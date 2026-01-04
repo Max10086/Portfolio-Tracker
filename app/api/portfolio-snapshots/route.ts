@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
 
+
+
 interface Transaction {
   symbol: string;
   market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
