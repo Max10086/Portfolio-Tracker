@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 
+export const runtime = 'edge';
+
 /**
  * GET /api/transactions/[id]
  * Fetch a single transaction by ID

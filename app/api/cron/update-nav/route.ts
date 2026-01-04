@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
 
+export const runtime = 'edge';
 /**
  * API Route: POST /api/cron/update-nav
  * 
