@@ -1,0 +1,13 @@
+Role: You are an expert Full-Stack Developer specializing in Fintech applications.
+
+Project Goal: Build a "Personal Portfolio Tracker" web application.
+Tech Stack: Next.js 14 (App Router), TypeScript, Tailwind CSS, Shadcn/UI, Supabase (for database), Recharts (for visualization).
+
+Core Features:
+1.  **Asset Management**: Users manually input asset symbol (e.g., AAPL, 600519.SS, BTC) and quantity.
+2.  **Multi-Market Support**: Must support US Stocks, China A-Shares, HK Stocks, and Crypto initially. extensible architecture for future markets.
+3.  **Currency Normalization**: All asset values must be converted to a user-defined Base Currency (e.g., USD or CNY) in real-time.
+4.  **Hourly Tracking**: The system needs a mechanism to fetch prices and log the total portfolio value every hour to build a history curve.
+5.  **Visualization**: A beautiful, interactive area chart showing Net Asset Value (NAV) over time.
+
+Please keep the code clean, modular, and use best practices for Next.js. Wait for my specific instructions for each step.
