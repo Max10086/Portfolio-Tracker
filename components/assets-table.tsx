@@ -44,6 +44,7 @@ export function AssetsTable({ assets, baseCurrency = 'USD' }: AssetsTableProps) 
       CN: 'CN',
       HK: 'HK',
       CRYPTO: 'Crypto',
+      CASH: 'Cash',
     };
     return labels[marketType] || marketType;
   };

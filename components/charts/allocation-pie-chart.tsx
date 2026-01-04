@@ -40,6 +40,7 @@ const MARKET_TYPE_LABELS: Record<string, string> = {
   CN: 'China A-Shares',
   HK: 'Hong Kong Stocks',
   CRYPTO: 'Cryptocurrency',
+  CASH: 'Cash',
 };
 
 export function AllocationPieChart({ assets, baseCurrency = 'USD', loading = false, error = null }: AllocationPieChartProps) {

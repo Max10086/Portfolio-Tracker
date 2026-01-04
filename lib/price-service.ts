@@ -2,7 +2,7 @@ import iconv from 'iconv-lite';
 import yahooFinance from 'yahoo-finance2';
 
 // Types
-export type MarketType = 'US' | 'CN' | 'HK' | 'CRYPTO';
+export type MarketType = 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
 
 export interface Asset {
   id: string;
@@ -339,7 +339,13 @@ export class CryptoFetcher implements PriceFetcher {
     }
 
     try {
-      const coinId = this.mapSymbolToCoinGeckoId(symbol.toLowerCase());
+      const normalizedSymbol = symbol.toLowerCase();
+      let coinId = this.mapSymbolToCoinGeckoId(normalizedSymbol);
+      
+      // If symbol is not in the map, try to find it using CoinGecko search API
+      if (coinId === normalizedSymbol) {
+        coinId = await this.searchCoinGeckoId(normalizedSymbol);
+      }
       
       const response = await fetch(
         `${this.baseUrl}/simple/price?ids=${coinId}&vs_currencies=usd`,
@@ -357,11 +363,11 @@ export class CryptoFetcher implements PriceFetcher {
       const data = await response.json();
       
       if (!data[coinId] || !data[coinId].usd) {
-        throw new Error(`No price data found for ${symbol}`);
+        throw new Error(`No price data found for ${symbol} (CoinGecko ID: ${coinId})`);
       }
 
       // Get full name from coins list
-      const name = this.getCryptoName(symbol.toLowerCase());
+      const name = this.getCryptoName(normalizedSymbol);
 
       const result: PriceResult = {
         price: data[coinId].usd,
@@ -377,6 +383,54 @@ export class CryptoFetcher implements PriceFetcher {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[CryptoFetcher] Failed to fetch ${symbol}:`, errorMessage);
       throw new Error(`Failed to fetch crypto price for ${symbol}: ${errorMessage}`);
+    }
+  }
+
+  // Search for CoinGecko ID by symbol using the search API
+  private async searchCoinGeckoId(symbol: string): Promise<string> {
+    try {
+      console.log(`[CryptoFetcher] Searching CoinGecko for symbol: ${symbol}`);
+      const response = await fetch(
+        `${this.baseUrl}/search?query=${encodeURIComponent(symbol)}`,
+        {
+          headers: {
+            'Accept': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`CoinGecko search API error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      // Look for exact symbol match in coins array
+      if (data.coins && Array.isArray(data.coins) && data.coins.length > 0) {
+        // Try to find exact match first (case-insensitive)
+        const exactMatch = data.coins.find(
+          (coin: any) => coin.symbol?.toLowerCase() === symbol.toLowerCase()
+        );
+        
+        if (exactMatch) {
+          console.log(`[CryptoFetcher] Found CoinGecko ID for ${symbol}: ${exactMatch.id}`);
+          return exactMatch.id;
+        }
+        
+        // If no exact match, use the first result
+        if (data.coins[0]?.id) {
+          console.log(`[CryptoFetcher] Using first search result for ${symbol}: ${data.coins[0].id}`);
+          return data.coins[0].id;
+        }
+      }
+      
+      // Fallback: try using symbol as-is (some coins might work)
+      console.log(`[CryptoFetcher] No search results for ${symbol}, using symbol as CoinGecko ID`);
+      return symbol;
+    } catch (error) {
+      console.warn(`[CryptoFetcher] Search failed for ${symbol}, using symbol as CoinGecko ID:`, error);
+      // Fallback: use symbol as-is
+      return symbol;
     }
   }
 
@@ -401,6 +455,7 @@ export class CryptoFetcher implements PriceFetcher {
       'vet': 'vechain',
       'icp': 'internet-computer',
       'fil': 'filecoin',
+      'paxg': 'pax-gold',
     };
 
     return symbolMap[symbol] || symbol;
@@ -427,9 +482,42 @@ export class CryptoFetcher implements PriceFetcher {
       'vet': 'VeChain',
       'icp': 'Internet Computer',
       'fil': 'Filecoin',
+      'paxg': 'PAX Gold',
     };
 
     return nameMap[symbol] || symbol.toUpperCase();
+  }
+}
+
+// Cash Fetcher - handles cash holdings in USD, CNY, HKD
+export class CashFetcher implements PriceFetcher {
+  supportsMarket(marketType: MarketType): boolean {
+    return marketType === 'CASH';
+  }
+
+  async fetchPrice(symbol: string): Promise<PriceResult> {
+    // Normalize symbol to uppercase
+    const normalizedSymbol = symbol.toUpperCase();
+    
+    // Validate currency
+    const validCurrencies = ['USD', 'CNY', 'HKD'];
+    if (!validCurrencies.includes(normalizedSymbol)) {
+      throw new Error(`Invalid cash currency: ${symbol}. Supported currencies: USD, CNY, HKD`);
+    }
+
+    // Cash always has a price of 1 in its own currency
+    const currencyNameMap: Record<string, string> = {
+      'USD': 'US Dollar',
+      'CNY': 'Chinese Yuan',
+      'HKD': 'Hong Kong Dollar',
+    };
+
+    return {
+      price: 1,
+      currency: normalizedSymbol,
+      symbol: normalizedSymbol,
+      name: currencyNameMap[normalizedSymbol] || normalizedSymbol,
+    };
   }
 }
 
@@ -526,6 +614,7 @@ class PriceFetcherFactory {
       new CNStockFetcher(),
       new HKStockFetcher(),
       new CryptoFetcher(),
+      new CashFetcher(),
     ];
   }
 

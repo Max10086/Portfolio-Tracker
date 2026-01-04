@@ -66,7 +66,7 @@ export async function PUT(
     }
 
     if (market_type !== undefined) {
-      const validMarketTypes = ['US', 'CN', 'HK', 'CRYPTO'];
+      const validMarketTypes = ['US', 'CN', 'HK', 'CRYPTO', 'CASH'];
       if (!validMarketTypes.includes(market_type)) {
         return NextResponse.json(
           { error: `Invalid market_type. Must be one of: ${validMarketTypes.join(', ')}` },

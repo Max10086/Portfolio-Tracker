@@ -12,7 +12,7 @@ import { TransactionsTable, type Transaction } from '@/components/transactions-t
 export interface AssetWithPrice {
   id: string;
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   quantity: number;
   created_at?: string;
   first_transaction_date?: string;
@@ -31,7 +31,7 @@ export interface HoldingsData {
     asset: {
       id: string;
       symbol: string;
-      market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+      market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
       quantity: number;
     };
     price: number;

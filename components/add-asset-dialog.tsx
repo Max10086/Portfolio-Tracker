@@ -22,6 +22,7 @@ import {
 import type { MarketType } from '@/lib/price-service';
 
 type TransactionType = 'BUY' | 'SELL';
+type CashCurrency = 'USD' | 'CNY' | 'HKD';
 
 interface AddAssetDialogProps {
   open: boolean;
@@ -36,6 +37,7 @@ export function AddAssetDialog({
 }: AddAssetDialogProps) {
   const [marketType, setMarketType] = useState<MarketType | ''>('');
   const [symbol, setSymbol] = useState('');
+  const [cashCurrency, setCashCurrency] = useState<CashCurrency>('USD');
   const [quantity, setQuantity] = useState('');
   const [transactionType, setTransactionType] = useState<TransactionType>('BUY');
   const [transactionDate, setTransactionDate] = useState(
@@ -46,10 +48,15 @@ export function AddAssetDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isCash = marketType === 'CASH';
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!marketType || !symbol || !quantity) {
+    // For cash, use the selected currency as symbol
+    const finalSymbol = isCash ? cashCurrency : symbol;
+    
+    if (!marketType || (!isCash && !symbol) || !quantity) {
       setError('Please fill in all required fields');
       return;
     }
@@ -75,7 +82,7 @@ export function AddAssetDialog({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          symbol: symbol.trim(),
+          symbol: finalSymbol,
           market_type: marketType,
           transaction_type: transactionType,
           quantity: quantityNum,
@@ -93,6 +100,7 @@ export function AddAssetDialog({
       // Reset form
       setMarketType('');
       setSymbol('');
+      setCashCurrency('USD');
       setQuantity('');
       setTransactionType('BUY');
       setTransactionDate(new Date().toISOString().split('T')[0]);
@@ -114,6 +122,7 @@ export function AddAssetDialog({
         // Reset form when closing
         setMarketType('');
         setSymbol('');
+        setCashCurrency('USD');
         setQuantity('');
         setTransactionType('BUY');
         setTransactionDate(new Date().toISOString().split('T')[0]);
@@ -158,36 +167,60 @@ export function AddAssetDialog({
               </div>
             </div>
 
-            {/* Market Type */}
+            {/* Asset Type */}
             <div className="grid gap-2">
-              <Label htmlFor="market-type">Market Type</Label>
+              <Label htmlFor="market-type">Asset Type</Label>
               <Select
                 value={marketType}
-                onValueChange={(value) => setMarketType(value as MarketType)}
+                onValueChange={(value) => {
+                  setMarketType(value as MarketType);
+                  // Reset symbol when market type changes
+                  setSymbol('');
+                }}
               >
                 <SelectTrigger id="market-type">
-                  <SelectValue placeholder="Select market type" />
+                  <SelectValue placeholder="Select asset type" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="US">US Stocks</SelectItem>
                   <SelectItem value="CN">China A-Shares</SelectItem>
                   <SelectItem value="HK">Hong Kong Stocks</SelectItem>
                   <SelectItem value="CRYPTO">Cryptocurrency</SelectItem>
+                  <SelectItem value="CASH">Cash</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
-            {/* Symbol */}
-            <div className="grid gap-2">
-              <Label htmlFor="symbol">Symbol</Label>
-              <Input
-                id="symbol"
-                placeholder="e.g., AAPL, 600519, BTC"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                disabled={loading}
-              />
-            </div>
+            {/* Symbol or Cash Currency */}
+            {isCash ? (
+              <div className="grid gap-2">
+                <Label htmlFor="cash-currency">Currency</Label>
+                <Select
+                  value={cashCurrency}
+                  onValueChange={(value) => setCashCurrency(value as CashCurrency)}
+                >
+                  <SelectTrigger id="cash-currency">
+                    <SelectValue placeholder="Select currency" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="USD">USD - US Dollar</SelectItem>
+                    <SelectItem value="CNY">CNY - Chinese Yuan</SelectItem>
+                    <SelectItem value="HKD">HKD - Hong Kong Dollar</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <div className="grid gap-2">
+                <Label htmlFor="symbol">Symbol</Label>
+                <Input
+                  id="symbol"
+                  placeholder="e.g., AAPL, 600519, BTC"
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+            )}
 
             {/* Quantity */}
             <div className="grid gap-2">

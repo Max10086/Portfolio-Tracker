@@ -33,7 +33,7 @@ import type { MarketType } from '@/lib/price-service';
 export interface Transaction {
   id: string;
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   transaction_type: 'BUY' | 'SELL';
   quantity: number;
   price_per_unit?: number;
@@ -83,6 +83,7 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
       CN: 'CN',
       HK: 'HK',
       CRYPTO: 'Crypto',
+      CASH: 'Cash',
     };
     return labels[marketType] || marketType;
   };
@@ -284,6 +285,7 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
                   <SelectItem value="CN">China A-Shares</SelectItem>
                   <SelectItem value="HK">Hong Kong Stocks</SelectItem>
                   <SelectItem value="CRYPTO">Cryptocurrency</SelectItem>
+                  <SelectItem value="CASH">Cash</SelectItem>
                 </SelectContent>
               </Select>
             </div>

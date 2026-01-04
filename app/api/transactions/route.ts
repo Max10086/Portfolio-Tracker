@@ -7,7 +7,7 @@ export type TransactionType = 'BUY' | 'SELL';
 export interface Transaction {
   id: string;
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   transaction_type: TransactionType;
   quantity: number;
   price_per_unit?: number;
@@ -19,7 +19,7 @@ export interface Transaction {
 
 export interface HoldingSummary {
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   quantity: number;
   first_transaction_date: string;
   last_transaction_date: string;
@@ -199,7 +199,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const validMarketTypes = ['US', 'CN', 'HK', 'CRYPTO'];
+    const validMarketTypes = ['US', 'CN', 'HK', 'CRYPTO', 'CASH'];
     if (!validMarketTypes.includes(market_type)) {
       return NextResponse.json(
         { error: `Invalid market_type. Must be one of: ${validMarketTypes.join(', ')}` },

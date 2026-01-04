@@ -4,10 +4,11 @@
 
 ### 初始设置
 
-如果这是首次设置项目，需要运行两个迁移脚本：
+如果这是首次设置项目，需要运行三个迁移脚本：
 
 1. `supabase/migrations/001_initial_schema.sql` - 创建基础表结构
 2. `supabase/migrations/002_add_transactions.sql` - 创建交易记录表（支持买入/卖出和日期）
+3. `supabase/migrations/003_add_cash_support.sql` - 添加现金资产类别支持（USD/CNY/HKD）
 
 ### 迁移步骤
 
@@ -21,6 +22,8 @@
 6. 点击 **Run** 执行 SQL
 7. 创建新查询，复制并粘贴 `supabase/migrations/002_add_transactions.sql` 文件的内容
 8. 点击 **Run** 执行 SQL
+9. 创建新查询，复制并粘贴 `supabase/migrations/003_add_cash_support.sql` 文件的内容
+10. 点击 **Run** 执行 SQL
 
 #### 方法 2: 使用 Supabase CLI
 
@@ -74,12 +77,19 @@ npm run dev
 ### 添加交易
 1. 点击 "Add Transaction" 按钮
 2. 选择交易类型：Buy（买入）或 Sell（卖出）
-3. 选择市场类型（US、CN、HK、CRYPTO）
-4. 输入股票代码
+3. 选择市场类型（US、CN、HK、CRYPTO、CASH）
+   - 如果选择 **CASH（现金）**，需要选择货币类型（USD/CNY/HKD）
+   - 其他市场类型需要输入股票代码
+4. 输入股票代码（现金类型会自动使用货币代码）
 5. 输入数量
 6. 选择交易日期
 7. （可选）输入成交价格和备注
 8. 点击提交
+
+### 现金管理
+- 选择市场类型为 "Cash" 时，可以添加或减少现金
+- 支持三种货币：USD（美元）、CNY（人民币）、HKD（港币）
+- 现金的价值始终为 1（以自身货币计价），会自动转换为基础货币显示
 
 ### 查看持仓
 - "Holdings" 标签页显示当前持仓摘要（从交易记录自动计算）

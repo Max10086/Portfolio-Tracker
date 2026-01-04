@@ -4,7 +4,7 @@ import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
 
 interface Transaction {
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   transaction_type: 'BUY' | 'SELL';
   quantity: number;
   transaction_date: string;
@@ -12,7 +12,7 @@ interface Transaction {
 
 interface HoldingAtDate {
   symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO';
+  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
   quantity: number;
 }
 
