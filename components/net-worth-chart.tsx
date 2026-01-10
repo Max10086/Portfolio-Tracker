@@ -40,6 +40,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
   const [error, setError] = useState<string | null>(null);
   const [baseCurrency, setBaseCurrency] = useState<string>('USD');
   const [source, setSource] = useState<string>('');
+  const [usdToCnyRate, setUsdToCnyRate] = useState<number | null>(null);
 
   const fetchSnapshots = useCallback(async () => {
     try {
@@ -66,6 +67,23 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
       
       setBaseCurrency(data.baseCurrency || 'USD');
       setSource(data.source || '');
+
+      // Fetch USD to CNY exchange rate if base currency is USD
+      if ((data.baseCurrency || 'USD') === 'USD') {
+        try {
+          const rateResponse = await fetch('/api/exchange-rate?from=USD&to=CNY');
+          if (rateResponse.ok) {
+            const rateData = await rateResponse.json();
+            setUsdToCnyRate(rateData.rate);
+          }
+        } catch (rateError) {
+          console.error('Failed to fetch USD to CNY rate:', rateError);
+          // Use fallback rate if API fails
+          setUsdToCnyRate(7.3);
+        }
+      } else {
+        setUsdToCnyRate(null);
+      }
 
       if (!data.snapshots || data.snapshots.length === 0) {
         setChartData([]);
@@ -227,11 +245,16 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
                 </span>
               )}
             </CardTitle>
-            <CardDescription className="flex items-center gap-2">
+            <CardDescription className="flex items-center gap-2 flex-wrap">
               Portfolio value over time
               {chartData.length > 1 && (
                 <span className={`text-sm font-medium ${totalChange >= 0 ? 'text-green-500' : 'text-red-500'}`}>
                   {totalChange >= 0 ? '↑' : '↓'} {Math.abs(totalChangePercent).toFixed(2)}%
+                </span>
+              )}
+              {baseCurrency === 'USD' && usdToCnyRate !== null && chartData.length > 0 && (
+                <span className="text-sm font-medium text-muted-foreground">
+                  • Net worth in CNY: ¥{(latestValue * usdToCnyRate).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               )}
               {source === 'generated' && (
