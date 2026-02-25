@@ -49,7 +49,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
 
       const params = new URLSearchParams();
       params.append('days', days.toString());
-      params.append('includeHistory', 'true'); // Generate history from transactions
       if (limit) params.append('limit', limit.toString());
 
       const response = await fetch(`/api/portfolio-snapshots?${params.toString()}`);
@@ -257,9 +256,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
                   • Net worth in CNY: ¥{(latestValue * usdToCnyRate).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               )}
-              {source === 'generated' && (
-                <span className="text-xs text-muted-foreground">• Generated from transactions</span>
-              )}
             </CardDescription>
           </div>
           <Button 
@@ -295,10 +291,10 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
 
         {!loading && !error && chartData.length === 0 && (
           <div className="flex h-[400px] items-center justify-center">
-            <div className="text-center">
-              <p className="text-muted-foreground mb-2">No data available</p>
+            <div className="text-center max-w-sm">
+              <p className="text-muted-foreground mb-2">No snapshots yet</p>
               <p className="text-sm text-muted-foreground">
-                Add transactions to see your portfolio value over time.
+                Portfolio value is recorded periodically by the cron job. Add transactions and wait for the next run, or trigger a manual snapshot via the API.
               </p>
             </div>
           </div>

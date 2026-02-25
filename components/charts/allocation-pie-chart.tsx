@@ -83,6 +83,25 @@ export function AllocationPieChart({ assets, baseCurrency = 'USD', loading = fal
     }));
   }, [assets]);
 
+  // Process data by tag (Uncategorized for assets with no tag)
+  const dataByTag = useMemo(() => {
+    if (!assets || assets.length === 0) return [];
+
+    const tagMap = new Map<string, number>();
+
+    assets.forEach((asset) => {
+      if (asset.value !== undefined && asset.value > 0) {
+        const tag = asset.tag?.trim() || 'Uncategorized';
+        const currentValue = tagMap.get(tag) || 0;
+        tagMap.set(tag, currentValue + asset.value);
+      }
+    });
+
+    return Array.from(tagMap.entries())
+      .map(([tag, value]) => ({ name: tag, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [assets]);
+
   // Process data by market type
   const dataByMarket = useMemo(() => {
     if (!assets || assets.length === 0) return [];
@@ -254,9 +273,10 @@ export function AllocationPieChart({ assets, baseCurrency = 'USD', loading = fal
       </CardHeader>
       <CardContent className="flex-1 overflow-auto">
         <Tabs defaultValue="asset" className="w-full">
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="asset">By Asset</TabsTrigger>
             <TabsTrigger value="market">By Market</TabsTrigger>
+            <TabsTrigger value="tag">By Tag</TabsTrigger>
           </TabsList>
 
           <TabsContent value="asset" className="mt-4">
@@ -320,6 +340,39 @@ export function AllocationPieChart({ assets, baseCurrency = 'USD', loading = fal
                   </Pie>
                   <Tooltip content={<CustomTooltip />} />
                   <Legend content={createLegendRenderer(dataByMarket)} />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </TabsContent>
+
+          <TabsContent value="tag" className="mt-4">
+            {dataByTag.length === 0 ? (
+              <div className="flex h-[400px] items-center justify-center">
+                <p className="text-muted-foreground">No tag data available. Add tags to your transactions to see allocation by tag.</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={500}>
+                <PieChart>
+                  <Pie
+                    data={dataByTag}
+                    cx="50%"
+                    cy="45%"
+                    labelLine={false}
+                    label={renderLabel}
+                    outerRadius={100}
+                    innerRadius={50}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {dataByTag.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={CHART_COLORS[index % CHART_COLORS.length]}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip content={<CustomTooltip />} />
+                  <Legend content={createLegendRenderer(dataByTag)} />
                 </PieChart>
               </ResponsiveContainer>
             )}

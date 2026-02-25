@@ -39,6 +39,7 @@ export interface Transaction {
   price_per_unit?: number;
   transaction_date: string;
   notes?: string;
+  tag?: string;
   created_at: string;
 }
 
@@ -61,6 +62,7 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
   const [editDate, setEditDate] = useState('');
   const [editPrice, setEditPrice] = useState('');
   const [editNotes, setEditNotes] = useState('');
+  const [editTag, setEditTag] = useState('');
 
   const formatNumber = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -97,6 +99,7 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
     setEditDate(tx.transaction_date);
     setEditPrice(tx.price_per_unit?.toString() || '');
     setEditNotes(tx.notes || '');
+    setEditTag(tx.tag || '');
     setError(null);
   };
 
@@ -123,6 +126,7 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
           transaction_date: editDate,
           price_per_unit: editPrice ? parseFloat(editPrice) : null,
           notes: editNotes.trim() || null,
+          tag: editTag.trim() || null,
         }),
       });
 
@@ -334,6 +338,17 @@ export function TransactionsTable({ transactions, onTransactionUpdated }: Transa
                 min="0"
                 value={editPrice}
                 onChange={(e) => setEditPrice(e.target.value)}
+                disabled={loading}
+              />
+            </div>
+
+            {/* Tag/Category */}
+            <div className="grid gap-2">
+              <Label>Tag / Category (Optional)</Label>
+              <Input
+                placeholder="e.g., Tech, Dividend"
+                value={editTag}
+                onChange={(e) => setEditTag(e.target.value)}
                 disabled={loading}
               />
             </div>

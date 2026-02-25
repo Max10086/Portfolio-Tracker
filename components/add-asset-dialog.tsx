@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -45,10 +45,37 @@ export function AddAssetDialog({
   );
   const [pricePerUnit, setPricePerUnit] = useState('');
   const [notes, setNotes] = useState('');
+  const [tag, setTag] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [updateCashBalance, setUpdateCashBalance] = useState(true);
+  const [cashAssetSymbol, setCashAssetSymbol] = useState<CashCurrency>('USD');
+  const [cashAssets, setCashAssets] = useState<Array<{ symbol: string; quantity: number; label: string }>>([]);
 
   const isCash = marketType === 'CASH';
+  const showCashOptions = updateCashBalance && !isCash;
+
+  // Default cash asset to match asset currency
+  const defaultCashForMarket = (mt: MarketType | ''): CashCurrency => {
+    if (mt === 'CN') return 'CNY';
+    if (mt === 'HK') return 'HKD';
+    return 'USD';
+  };
+
+  useEffect(() => {
+    if (marketType) {
+      setCashAssetSymbol(defaultCashForMarket(marketType));
+    }
+  }, [marketType]);
+
+  useEffect(() => {
+    if (open) {
+      fetch('/api/cash-assets')
+        .then((res) => res.ok ? res.json() : { cashAssets: [] })
+        .then((data) => setCashAssets(data.cashAssets || []))
+        .catch(() => setCashAssets([]));
+    }
+  }, [open]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,6 +116,9 @@ export function AddAssetDialog({
           transaction_date: transactionDate,
           price_per_unit: pricePerUnit ? parseFloat(pricePerUnit) : undefined,
           notes: notes.trim() || undefined,
+          update_cash_balance: !isCash ? updateCashBalance : false,
+          cash_asset_symbol: showCashOptions ? cashAssetSymbol : undefined,
+          tag: tag.trim() || undefined,
         }),
       });
 
@@ -106,6 +136,9 @@ export function AddAssetDialog({
       setTransactionDate(new Date().toISOString().split('T')[0]);
       setPricePerUnit('');
       setNotes('');
+      setTag('');
+      setUpdateCashBalance(true);
+      setCashAssetSymbol('USD');
       setError(null);
       onAssetAdded();
     } catch (err) {
@@ -128,6 +161,9 @@ export function AddAssetDialog({
         setTransactionDate(new Date().toISOString().split('T')[0]);
         setPricePerUnit('');
         setNotes('');
+        setTag('');
+        setUpdateCashBalance(true);
+        setCashAssetSymbol('USD');
         setError(null);
       }
     }
@@ -250,6 +286,54 @@ export function AddAssetDialog({
               />
             </div>
 
+            {/* Update Cash Balance - only for non-cash assets */}
+            {!isCash && (
+              <>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="update-cash"
+                    checked={updateCashBalance}
+                    onChange={(e) => setUpdateCashBalance(e.target.checked)}
+                    disabled={loading}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <Label htmlFor="update-cash" className="font-normal cursor-pointer">
+                    Update Cash Balance?
+                  </Label>
+                </div>
+                {showCashOptions && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="cash-asset">Cash Asset to deduct from / add to</Label>
+                    <Select
+                      value={cashAssetSymbol}
+                      onValueChange={(v) => setCashAssetSymbol(v as CashCurrency)}
+                      disabled={loading}
+                    >
+                      <SelectTrigger id="cash-asset">
+                        <SelectValue placeholder="Select cash asset" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {cashAssets.length > 0 ? (
+                          cashAssets.map((ca) => (
+                            <SelectItem key={ca.symbol} value={ca.symbol}>
+                              {ca.label} (balance: {ca.quantity.toLocaleString('en-US', { minimumFractionDigits: 2 })})
+                            </SelectItem>
+                          ))
+                        ) : (
+                          <>
+                            <SelectItem value="USD">USD Cash</SelectItem>
+                            <SelectItem value="CNY">CNY Cash</SelectItem>
+                            <SelectItem value="HKD">HKD Cash</SelectItem>
+                          </>
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </>
+            )}
+
             {/* Price Per Unit (Optional) */}
             <div className="grid gap-2">
               <Label htmlFor="price-per-unit">
@@ -263,6 +347,20 @@ export function AddAssetDialog({
                 placeholder="Record purchase/sell price"
                 value={pricePerUnit}
                 onChange={(e) => setPricePerUnit(e.target.value)}
+                disabled={loading}
+              />
+            </div>
+
+            {/* Tag/Category (Optional) */}
+            <div className="grid gap-2">
+              <Label htmlFor="tag">
+                Tag / Category <span className="text-muted-foreground">(Optional)</span>
+              </Label>
+              <Input
+                id="tag"
+                placeholder="e.g., Tech, Dividend"
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
                 disabled={loading}
               />
             </div>

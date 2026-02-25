@@ -2,16 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
 
-
-
-interface Transaction {
-  symbol: string;
-  market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
-  transaction_type: 'BUY' | 'SELL';
-  quantity: number;
-  transaction_date: string;
-}
-
 interface HoldingAtDate {
   symbol: string;
   market_type: 'US' | 'CN' | 'HK' | 'CRYPTO' | 'CASH';
@@ -19,39 +9,66 @@ interface HoldingAtDate {
 }
 
 /**
- * Calculate holdings at a specific date based on transactions
+ * Calculate current portfolio value from holdings (for manual snapshot recording)
  */
-function calculateHoldingsAtDate(transactions: Transaction[], targetDate: Date): HoldingAtDate[] {
-  const holdingsMap = new Map<string, HoldingAtDate>();
+async function calculateCurrentPortfolioValue(
+  supabase: ReturnType<typeof createServerClient>,
+  baseCurrency: string
+): Promise<number | null> {
+  let holdings: HoldingAtDate[] = [];
 
-  for (const tx of transactions) {
-    const txDate = new Date(tx.transaction_date);
-    if (txDate > targetDate) continue; // Skip transactions after target date
+  const { data: viewData, error: viewError } = await supabase
+    .from('current_holdings')
+    .select('symbol, market_type, quantity');
 
-    const key = `${tx.symbol}:${tx.market_type}`;
-    const qty = tx.transaction_type === 'BUY' ? tx.quantity : -tx.quantity;
-    
-    const existing = holdingsMap.get(key);
-    if (existing) {
-      existing.quantity += qty;
-    } else {
-      holdingsMap.set(key, {
-        symbol: tx.symbol,
-        market_type: tx.market_type,
-        quantity: qty,
-      });
+  if (!viewError && viewData && viewData.length > 0) {
+    holdings = viewData.map((h) => ({
+      symbol: h.symbol,
+      market_type: h.market_type,
+      quantity: Number(h.quantity),
+    }));
+  } else {
+    const { data: transactions, error: txError } = await supabase
+      .from('transactions')
+      .select('symbol, market_type, transaction_type, quantity');
+
+    if (txError || !transactions || transactions.length === 0) return null;
+
+    const map = new Map<string, number>();
+    for (const tx of transactions) {
+      const key = `${tx.symbol}:${tx.market_type}`;
+      const qty = tx.transaction_type === 'BUY' ? tx.quantity : -tx.quantity;
+      map.set(key, (map.get(key) || 0) + qty);
     }
+    holdings = Array.from(map.entries())
+      .filter(([, q]) => q > 0)
+      .map(([k, q]) => {
+        const [symbol, market_type] = k.split(':');
+        return { symbol, market_type: market_type as HoldingAtDate['market_type'], quantity: q };
+      });
   }
 
-  return Array.from(holdingsMap.values()).filter(h => h.quantity > 0);
+  if (holdings.length === 0) return 0;
+
+  const assets: Asset[] = holdings.map((h, idx) => ({
+    id: `${h.symbol}-${idx}`,
+    symbol: h.symbol,
+    market_type: h.market_type,
+    quantity: h.quantity,
+  }));
+
+  try {
+    const result = await calculatePortfolioTotal({ assets, baseCurrency });
+    return result.totalValue;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * GET /api/portfolio-snapshots
- * Fetch portfolio snapshots for chart visualization
- * 
- * If no stored snapshots exist, calculates historical values from transactions
- * Optional query params: limit, days, includeHistory (generates from transactions)
+ * Fetch immutable portfolio snapshots for chart visualization.
+ * Returns ONLY stored records from portfolio_snapshots - no recalculations or generated history.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -59,10 +76,8 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const days = searchParams.get('days');
     const limit = searchParams.get('limit');
-    const includeHistory = searchParams.get('includeHistory') === 'true';
     const baseCurrency = process.env.BASE_CURRENCY || 'USD';
 
-    // First, try to fetch stored snapshots
     let query = supabase
       .from('portfolio_snapshots')
       .select('id, total_value, recorded_at')
@@ -84,52 +99,34 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const { data: storedSnapshots, error: snapshotsError } = await query;
+    const { data: snapshots, error } = await query;
 
-    // If there are stored snapshots, return them
-    if (!snapshotsError && storedSnapshots && storedSnapshots.length > 0) {
-      return NextResponse.json({
-        snapshots: storedSnapshots,
-        baseCurrency,
-        source: 'stored',
-      });
+    if (error) {
+      console.error('Error fetching portfolio snapshots:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch snapshots', details: error.message },
+        { status: 500 }
+      );
     }
 
-    // No stored snapshots - calculate from transactions if requested
-    if (includeHistory) {
-      return await generateHistoryFromTransactions(supabase, baseCurrency, parseInt(days || '30', 10));
-    }
-
-    // No stored snapshots and no history generation requested
-    // Calculate current portfolio value and return as a single point
-    const currentValue = await calculateCurrentPortfolioValue(supabase, baseCurrency);
-    
-    if (currentValue !== null) {
-      return NextResponse.json({
-        snapshots: [{
-          id: 'current',
-          total_value: currentValue,
-          recorded_at: new Date().toISOString(),
-        }],
-        baseCurrency,
-        source: 'calculated',
-        message: 'No historical data available. Showing current portfolio value. Add transactions to generate history.',
-      });
-    }
-
-    // No transactions at all
     return NextResponse.json({
-      snapshots: [],
+      snapshots: snapshots || [],
       baseCurrency,
-      source: 'empty',
-      message: 'No transactions found. Add your first transaction to start tracking.',
+      source: 'stored',
+      message:
+        (snapshots?.length ?? 0) === 0
+          ? 'No snapshots yet. The cron job records portfolio value periodically. Add transactions and wait for the next snapshot, or use "Record Snapshot" to capture manually.'
+          : undefined,
     });
-
   } catch (error) {
     console.error('Unexpected error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
-    if (errorMessage.includes('table') || errorMessage.includes('schema cache') || errorMessage.includes('does not exist')) {
+
+    if (
+      errorMessage.includes('table') ||
+      errorMessage.includes('schema cache') ||
+      errorMessage.includes('does not exist')
+    ) {
       return NextResponse.json(
         {
           error: 'Database table not found',
@@ -138,7 +135,7 @@ export async function GET(request: NextRequest) {
         { status: 500 }
       );
     }
-    
+
     return NextResponse.json(
       { error: 'Internal server error', details: errorMessage },
       { status: 500 }
@@ -147,189 +144,14 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * Calculate current portfolio value from transactions
- */
-async function calculateCurrentPortfolioValue(supabase: ReturnType<typeof createServerClient>, baseCurrency: string): Promise<number | null> {
-  // First try using current_holdings view
-  let holdings: HoldingAtDate[] = [];
-  
-  const { data: viewData, error: viewError } = await supabase
-    .from('current_holdings')
-    .select('symbol, market_type, quantity');
-
-  if (!viewError && viewData && viewData.length > 0) {
-    holdings = viewData.map(h => ({
-      symbol: h.symbol,
-      market_type: h.market_type,
-      quantity: Number(h.quantity),
-    }));
-  } else {
-    // Fall back to calculating from transactions
-    const { data: transactions, error: txError } = await supabase
-      .from('transactions')
-      .select('symbol, market_type, transaction_type, quantity');
-
-    if (txError || !transactions || transactions.length === 0) {
-      return null;
-    }
-
-    holdings = calculateHoldingsAtDate(
-      transactions as Transaction[],
-      new Date()
-    );
-  }
-
-  if (holdings.length === 0) {
-    return 0;
-  }
-
-  // Calculate total value with current prices
-  const assets: Asset[] = holdings.map((h, idx) => ({
-    id: `${h.symbol}-${idx}`,
-    symbol: h.symbol,
-    market_type: h.market_type,
-    quantity: h.quantity,
-  }));
-
-  try {
-    const result = await calculatePortfolioTotal({ assets, baseCurrency });
-    return result.totalValue;
-  } catch (error) {
-    console.error('Error calculating portfolio value:', error);
-    return null;
-  }
-}
-
-/**
- * Generate historical snapshots from transactions
- * Uses current prices for all historical calculations (simplified approach)
- */
-async function generateHistoryFromTransactions(
-  supabase: ReturnType<typeof createServerClient>,
-  baseCurrency: string,
-  daysBack: number
-): Promise<NextResponse> {
-  try {
-    // Fetch all transactions
-    const { data: transactions, error: txError } = await supabase
-      .from('transactions')
-      .select('symbol, market_type, transaction_type, quantity, transaction_date')
-      .order('transaction_date', { ascending: true });
-
-    if (txError) {
-      console.error('Error fetching transactions:', txError);
-      return NextResponse.json({
-        snapshots: [],
-        baseCurrency,
-        error: 'Failed to fetch transactions',
-      });
-    }
-
-    if (!transactions || transactions.length === 0) {
-      return NextResponse.json({
-        snapshots: [],
-        baseCurrency,
-        source: 'calculated',
-        message: 'No transactions found.',
-      });
-    }
-
-    // Find date range
-    const earliestTx = new Date(transactions[0].transaction_date);
-    const now = new Date();
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - daysBack);
-    
-    const startDate = earliestTx > cutoffDate ? earliestTx : cutoffDate;
-    
-    // Generate daily snapshots
-    const snapshots: Array<{ id: string; total_value: number; recorded_at: string }> = [];
-    const currentDate = new Date(startDate);
-    
-    // Get current prices once (we'll use these for all historical calculations)
-    // This is a simplification - ideally we'd fetch historical prices
-    const allHoldings = calculateHoldingsAtDate(transactions as Transaction[], now);
-    
-    // Store prices converted to base currency (price per unit in base currency)
-    let pricesInBaseCurrency: Map<string, number> = new Map();
-    
-    if (allHoldings.length > 0) {
-      const assets: Asset[] = allHoldings.map((h, idx) => ({
-        id: `${h.symbol}-${idx}`,
-        symbol: h.symbol,
-        market_type: h.market_type,
-        quantity: h.quantity,
-      }));
-
-      try {
-        const result = await calculatePortfolioTotal({ assets, baseCurrency });
-        for (const detail of result.assetDetails) {
-          // Calculate price per unit in base currency
-          // detail.value is already converted to base currency (price * quantity * exchangeRate)
-          // So price per unit in base currency = detail.value / detail.asset.quantity
-          const pricePerUnitInBaseCurrency = detail.asset.quantity > 0 
-            ? detail.value / detail.asset.quantity 
-            : 0;
-          pricesInBaseCurrency.set(
-            `${detail.asset.symbol}:${detail.asset.market_type}`, 
-            pricePerUnitInBaseCurrency
-          );
-        }
-      } catch (error) {
-        console.error('Error fetching prices:', error);
-        // Continue with empty prices - values will be 0
-      }
-    }
-
-    // Generate snapshots for each day
-    while (currentDate <= now) {
-      const holdingsAtDate = calculateHoldingsAtDate(transactions as Transaction[], currentDate);
-      
-      let totalValue = 0;
-      for (const holding of holdingsAtDate) {
-        // Use prices already converted to base currency
-        const priceInBaseCurrency = pricesInBaseCurrency.get(`${holding.symbol}:${holding.market_type}`);
-        if (priceInBaseCurrency) {
-          totalValue += holding.quantity * priceInBaseCurrency;
-        }
-      }
-
-      snapshots.push({
-        id: `generated-${currentDate.toISOString()}`,
-        total_value: totalValue,
-        recorded_at: new Date(currentDate).toISOString(),
-      });
-
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
-
-    return NextResponse.json({
-      snapshots,
-      baseCurrency,
-      source: 'generated',
-      message: 'Historical data generated from transactions using current prices.',
-    });
-  } catch (error) {
-    console.error('Error generating history:', error);
-    return NextResponse.json({
-      snapshots: [],
-      baseCurrency,
-      error: 'Failed to generate history',
-      details: (error as Error).message,
-    });
-  }
-}
-
-/**
  * POST /api/portfolio-snapshots
- * Manually record a portfolio snapshot (useful for testing)
+ * Manually record a portfolio snapshot (useful for testing or initial setup)
  */
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServerClient();
     const baseCurrency = process.env.BASE_CURRENCY || 'USD';
 
-    // Calculate current portfolio value
     const totalValue = await calculateCurrentPortfolioValue(supabase, baseCurrency);
 
     if (totalValue === null) {
@@ -339,7 +161,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Insert snapshot
     const { data, error } = await supabase
       .from('portfolio_snapshots')
       .insert({

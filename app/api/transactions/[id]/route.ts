@@ -56,7 +56,7 @@ export async function PUT(
   try {
     const { id } = await params;
     const body = await request.json();
-    const { symbol, market_type, transaction_type, quantity, price_per_unit, transaction_date, notes } = body;
+    const { symbol, market_type, transaction_type, quantity, price_per_unit, transaction_date, notes, tag } = body;
 
     const supabase = createServerClient();
 
@@ -113,6 +113,10 @@ export async function PUT(
 
     if (notes !== undefined) {
       updateData.notes = notes || null;
+    }
+
+    if (tag !== undefined) {
+      updateData.tag = tag && String(tag).trim() ? String(tag).trim() : null;
     }
 
     if (Object.keys(updateData).length === 0) {

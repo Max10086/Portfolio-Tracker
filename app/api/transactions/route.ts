@@ -26,6 +26,7 @@ export interface HoldingSummary {
   first_transaction_date: string;
   last_transaction_date: string;
   transaction_count: number;
+  tag?: string;
 }
 
 /**
@@ -104,14 +105,14 @@ export async function GET(request: NextRequest) {
       const calculatedHoldings = Array.from(holdingsMap.values())
         .filter(h => h.quantity > 0);
 
-      return await enrichHoldingsWithPrices(calculatedHoldings);
+      return await enrichHoldingsWithPrices(supabase, calculatedHoldings);
     }
 
     if (!holdings || holdings.length === 0) {
       return NextResponse.json({ assets: [], assetDetails: [], totalValue: 0 });
     }
 
-    return await enrichHoldingsWithPrices(holdings);
+    return await enrichHoldingsWithPrices(supabase, holdings);
   } catch (error) {
     console.error('Unexpected error:', error);
     return NextResponse.json(
@@ -121,11 +122,34 @@ export async function GET(request: NextRequest) {
   }
 }
 
-async function enrichHoldingsWithPrices(holdings: HoldingSummary[]) {
+async function enrichHoldingsWithPrices(
+  supabase: ReturnType<typeof createServerClient>,
+  holdings: HoldingSummary[]
+) {
   const baseCurrency = process.env.BASE_CURRENCY || 'USD';
-  
+
+  // Fetch tag for each holding from most recent transaction
+  const tagMap = new Map<string, string>();
+  const { data: taggedTxs } = await supabase
+    .from('transactions')
+    .select('symbol, market_type, tag')
+    .not('tag', 'is', null)
+    .order('transaction_date', { ascending: false });
+
+  for (const tx of taggedTxs || []) {
+    const key = `${tx.symbol}:${tx.market_type}`;
+    if (!tagMap.has(key) && tx.tag) {
+      tagMap.set(key, tx.tag);
+    }
+  }
+
+  const holdingsWithTag = holdings.map((h) => ({
+    ...h,
+    tag: tagMap.get(`${h.symbol}:${h.market_type}`),
+  }));
+
   // Convert holdings to assets format for price calculation
-  const assets: Asset[] = holdings.map((h, index) => ({
+  const assets: Asset[] = holdingsWithTag.map((h, index) => ({
     id: `${h.symbol}-${index}`,
     symbol: h.symbol,
     market_type: h.market_type,
@@ -138,10 +162,10 @@ async function enrichHoldingsWithPrices(holdings: HoldingSummary[]) {
       baseCurrency,
     });
 
-    // Merge holdings with price data
-    const enrichedAssets = holdings.map((holding, index) => {
+    // Merge holdings with price data and tag
+    const enrichedAssets = holdingsWithTag.map((holding, index) => {
       const detail = calculationResult.assetDetails.find(
-        d => d.asset.symbol === holding.symbol && d.asset.market_type === holding.market_type
+        (d) => d.asset.symbol === holding.symbol && d.asset.market_type === holding.market_type
       );
       return {
         id: `${holding.symbol}-${index}`,
@@ -151,10 +175,11 @@ async function enrichHoldingsWithPrices(holdings: HoldingSummary[]) {
         first_transaction_date: holding.first_transaction_date,
         last_transaction_date: holding.last_transaction_date,
         transaction_count: holding.transaction_count,
+        tag: holding.tag,
         price: detail?.price || 0,
         value: detail?.value || 0,
-        currency: detail?.currency || baseCurrency, // Original currency for price display
-        baseCurrency: baseCurrency, // Base currency for value display
+        currency: detail?.currency || baseCurrency,
+        baseCurrency: baseCurrency,
         name: detail?.name,
       };
     });
@@ -177,13 +202,57 @@ async function enrichHoldingsWithPrices(holdings: HoldingSummary[]) {
 }
 
 /**
+ * Get transaction value (price * quantity) for non-cash assets.
+ * Uses price_per_unit if provided, otherwise fetches current price.
+ */
+async function getTransactionValue(
+  symbol: string,
+  marketType: string,
+  quantity: number,
+  pricePerUnit?: number
+): Promise<{ value: number; currency: string }> {
+  if (pricePerUnit !== undefined && pricePerUnit !== null && !isNaN(parseFloat(String(pricePerUnit)))) {
+    const price = parseFloat(String(pricePerUnit));
+    const currency = marketType === 'US' || marketType === 'CRYPTO' ? 'USD' : marketType === 'CN' ? 'CNY' : 'HKD';
+    return { value: price * quantity, currency };
+  }
+  const assets: Asset[] = [{
+    id: 'temp',
+    symbol: symbol.trim().toUpperCase(),
+    market_type: marketType as Asset['market_type'],
+    quantity: 1,
+  }];
+  const result = await calculatePortfolioTotal({ assets, baseCurrency: 'USD' });
+  const detail = result.assetDetails[0];
+  if (!detail) {
+    throw new Error(`Could not fetch price for ${symbol}`);
+  }
+  const price = detail.price;
+  const currency = detail.currency;
+  return { value: price * quantity, currency };
+}
+
+/**
  * POST /api/transactions
  * Add a new transaction (buy or sell)
+ * Supports optional cash reconciliation: when update_cash_balance=true, automatically
+ * adjusts the selected Cash asset (BUY stock => decrement cash, SELL stock => increment cash).
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { symbol, market_type, transaction_type, quantity, price_per_unit, transaction_date, notes } = body;
+    const {
+      symbol,
+      market_type,
+      transaction_type,
+      quantity,
+      price_per_unit,
+      transaction_date,
+      notes,
+      tag,
+      update_cash_balance = true,
+      cash_asset_symbol,
+    } = body;
 
     // Validation
     if (!symbol || !market_type || !quantity) {
@@ -217,17 +286,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // For SELL transactions, validate that user has enough holdings
+    const supabase = createServerClient();
+
+    // For SELL transactions, validate that user has enough holdings of the asset being sold
     if (txType === 'SELL') {
-      const supabase = createServerClient();
       const { data: holdings } = await supabase
         .from('current_holdings')
         .select('quantity')
         .eq('symbol', symbol.trim().toUpperCase())
         .eq('market_type', market_type)
-        .single();
+        .maybeSingle();
 
-      const currentQty = holdings?.quantity || 0;
+      const currentQty = Number(holdings?.quantity ?? 0);
       if (currentQty < quantityNum) {
         return NextResponse.json(
           { error: `Cannot sell ${quantityNum} ${symbol}. Current holdings: ${currentQty}` },
@@ -236,23 +306,126 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const supabase = createServerClient();
+    // Cash reconciliation: only for non-CASH assets when update_cash_balance is true
+    const shouldUpdateCash = update_cash_balance && market_type !== 'CASH' && cash_asset_symbol;
+    let transactionValue = 0;
+    let transactionCurrency = 'USD';
 
-    // Insert new transaction
+    if (shouldUpdateCash) {
+      const validCashSymbols = ['USD', 'CNY', 'HKD'];
+      const cashSymbol = String(cash_asset_symbol).trim().toUpperCase();
+      if (!validCashSymbols.includes(cashSymbol)) {
+        return NextResponse.json(
+          { error: 'Invalid cash_asset_symbol. Must be USD, CNY, or HKD' },
+          { status: 400 }
+        );
+      }
+
+      try {
+        const tv = await getTransactionValue(symbol, market_type, quantityNum, price_per_unit);
+        transactionValue = tv.value;
+        transactionCurrency = tv.currency;
+      } catch (err) {
+        return NextResponse.json(
+          { error: 'Could not determine transaction value. Please provide price per unit or ensure the asset symbol is valid.' },
+          { status: 400 }
+        );
+      }
+
+      // Validate cash currency matches asset currency
+      if (transactionCurrency !== cashSymbol) {
+        return NextResponse.json(
+          { error: `Transaction is in ${transactionCurrency}. Please select ${transactionCurrency} Cash to reconcile.` },
+          { status: 400 }
+        );
+      }
+
+      // For BUY: validate sufficient cash balance
+      if (txType === 'BUY') {
+        const { data: cashHolding } = await supabase
+          .from('current_holdings')
+          .select('quantity')
+          .eq('symbol', cashSymbol)
+          .eq('market_type', 'CASH')
+          .maybeSingle();
+
+        const cashBalance = Number(cashHolding?.quantity ?? 0);
+        if (cashBalance < transactionValue) {
+          return NextResponse.json(
+            { error: `Insufficient ${cashSymbol} balance. Required: ${transactionValue.toFixed(2)}, Available: ${cashBalance.toFixed(2)}` },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
+    const txDate = transaction_date || new Date().toISOString().split('T')[0];
+    const pricePerUnitNum = price_per_unit !== undefined && price_per_unit !== null && price_per_unit !== ''
+      ? parseFloat(price_per_unit)
+      : null;
+
+    // Use atomic RPC when cash reconciliation is enabled
+    if (shouldUpdateCash) {
+      const { data: txId, error: rpcError } = await supabase.rpc('execute_transaction_with_cash_update', {
+        p_symbol: symbol.trim().toUpperCase(),
+        p_market_type: market_type,
+        p_transaction_type: txType,
+        p_quantity: quantityNum,
+        p_price_per_unit: pricePerUnitNum,
+        p_transaction_date: txDate,
+        p_notes: notes || null,
+        p_cash_symbol: String(cash_asset_symbol).trim().toUpperCase(),
+        p_cash_quantity: transactionValue,
+      });
+
+      if (rpcError) {
+        console.error('Error in execute_transaction_with_cash_update:', rpcError);
+        return NextResponse.json(
+          { error: 'Failed to add transaction', details: rpcError.message },
+          { status: 500 }
+        );
+      }
+
+      if (tag && String(tag).trim()) {
+        await supabase
+          .from('transactions')
+          .update({ tag: String(tag).trim() })
+          .eq('id', txId);
+      }
+
+      const { data: transaction, error: fetchError } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('id', txId)
+        .single();
+
+      if (fetchError || !transaction) {
+        return NextResponse.json(
+          { error: 'Transaction created but failed to fetch', details: fetchError?.message },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({ transaction }, { status: 201 });
+    }
+
+    // Standard insert (no cash update)
     const insertData: Record<string, unknown> = {
       symbol: symbol.trim().toUpperCase(),
       market_type,
       transaction_type: txType,
       quantity: quantityNum,
-      transaction_date: transaction_date || new Date().toISOString().split('T')[0],
+      transaction_date: txDate,
     };
 
-    if (price_per_unit !== undefined && price_per_unit !== null && price_per_unit !== '') {
-      insertData.price_per_unit = parseFloat(price_per_unit);
+    if (pricePerUnitNum !== null) {
+      insertData.price_per_unit = pricePerUnitNum;
     }
-
     if (notes) {
       insertData.notes = notes;
+    }
+    if (tag && String(tag).trim()) {
+      insertData.tag = String(tag).trim();
     }
 
     const { data, error } = await supabase

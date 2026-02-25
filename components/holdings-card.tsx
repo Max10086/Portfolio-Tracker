@@ -20,9 +20,10 @@ export interface AssetWithPrice {
   transaction_count?: number;
   price?: number;
   value?: number;
-  currency?: string;      // Original currency of the asset (e.g., CNY for A-shares)
-  baseCurrency?: string;  // Base currency for value display (e.g., USD)
+  currency?: string;
+  baseCurrency?: string;
   name?: string;
+  tag?: string;
 }
 
 export interface HoldingsData {
@@ -201,7 +202,14 @@ export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
             )}
 
             {!loading && !error && holdings && holdings.assets.length > 0 && (
-              <AssetsTable assets={holdings.assets} baseCurrency={holdings.baseCurrency || 'USD'} />
+              <AssetsTable
+                assets={holdings.assets}
+                baseCurrency={holdings.baseCurrency || 'USD'}
+                onTagUpdated={() => {
+                  fetchAll();
+                  onAssetsChanged?.();
+                }}
+              />
             )}
 
             {!loading && !error && (!holdings || holdings.assets.length === 0) && (
