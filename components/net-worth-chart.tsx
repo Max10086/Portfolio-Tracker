@@ -29,18 +29,32 @@ interface ChartData {
 }
 
 interface NetWorthChartProps {
-  days?: number;
+  defaultDays?: number; // 改为 defaultDays
   limit?: number;
   refreshTrigger?: number;
 }
 
-export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChartProps) {
-  const [chartData, setChartData] = useState<ChartData[]>([]);
+// 定义时间跨度选项
+const TIME_RANGES =[
+  { label: '7D', days: 7 },
+  { label: '1M', days: 30 },
+  { label: '3M', days: 90 },
+  { label: '1Y', days: 365 },
+  { label: '3Y', days: 1095 },
+];
+
+export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWorthChartProps) {
+  const[chartData, setChartData] = useState<ChartData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [baseCurrency, setBaseCurrency] = useState<string>('USD');
+  const[baseCurrency, setBaseCurrency] = useState<string>('USD');
   const [source, setSource] = useState<string>('');
   const [usdToCnyRate, setUsdToCnyRate] = useState<number | null>(null);
+  
+  // 新增：当前选中的时间跨度状态
+  const [activeRange, setActiveRange] = useState(
+    TIME_RANGES.find(r => r.days === defaultDays) || TIME_RANGES[1]
+  );
 
   const fetchSnapshots = useCallback(async () => {
     try {
@@ -48,10 +62,15 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
       setError(null);
 
       const params = new URLSearchParams();
-      params.append('days', days.toString());
+      // 使用选中的天数发起请求
+      params.append('days', activeRange.days.toString());
       if (limit) params.append('limit', limit.toString());
 
-      const response = await fetch(`/api/portfolio-snapshots?${params.toString()}`);
+      // 加入了防止缓存的配置
+      const response = await fetch(`/api/portfolio-snapshots?${params.toString()}&_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' }
+      });
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -67,7 +86,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
       setBaseCurrency(data.baseCurrency || 'USD');
       setSource(data.source || '');
 
-      // Fetch USD to CNY exchange rate if base currency is USD
+      // Fetch USD to CNY exchange rate
       if ((data.baseCurrency || 'USD') === 'USD') {
         try {
           const rateResponse = await fetch('/api/exchange-rate?from=USD&to=CNY');
@@ -77,7 +96,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
           }
         } catch (rateError) {
           console.error('Failed to fetch USD to CNY rate:', rateError);
-          // Use fallback rate if API fails
           setUsdToCnyRate(7.3);
         }
       } else {
@@ -89,68 +107,57 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
         return;
       }
 
+      let processedSnapshots = data.snapshots;
+
+      // 💡 降采样逻辑 (Downsampling)：如果请求超过 30 天的数据，每天只保留 1 个最新数据点
+      if (activeRange.days > 30) {
+        const dailyMap = new Map();
+        processedSnapshots.forEach((snap: PortfolioSnapshot) => {
+          const date = new Date(snap.recorded_at);
+          // 使用 YYYY-MM-DD 作为 key，后遍历到的（当天的最后一个小时）会覆盖前面的
+          const dateKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+          dailyMap.set(dateKey, snap);
+        });
+        processedSnapshots = Array.from(dailyMap.values());
+      }
+
       // Transform data for chart
-      const transformed: ChartData[] = data.snapshots.map((snapshot: PortfolioSnapshot) => {
+      const transformed: ChartData[] = processedSnapshots.map((snapshot: PortfolioSnapshot) => {
         const timestamp = new Date(snapshot.recorded_at);
         
-        // Determine date range to format appropriately
         const now = new Date();
-        const oldestDate = data.snapshots.length > 0 
-          ? new Date(data.snapshots[0].recorded_at)
+        const oldestDate = processedSnapshots.length > 0 
+          ? new Date(processedSnapshots[0].recorded_at)
           : timestamp;
         const dateRange = now.getTime() - oldestDate.getTime();
         const daysDiff = dateRange / (1000 * 60 * 60 * 24);
 
-        // Format based on range
         let formattedDate: string;
         let formattedTime: string;
         let timeLabel: string;
 
+        // 根据时间跨度优化 X 轴显示
         if (daysDiff <= 1) {
-          formattedTime = timestamp.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
-          formattedDate = timestamp.toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-          });
+          formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+          formattedDate = timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
           timeLabel = formattedTime;
         } else if (daysDiff <= 7) {
-          formattedTime = timestamp.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
-          formattedDate = timestamp.toLocaleDateString('en-US', {
-            weekday: 'short',
-            month: 'short',
-            day: 'numeric',
-          });
+          formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+          formattedDate = timestamp.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
           timeLabel = `${timestamp.toLocaleDateString('en-US', { weekday: 'short' })} ${formattedTime}`;
         } else if (daysDiff <= 30) {
-          formattedDate = timestamp.toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-          });
-          formattedTime = timestamp.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
+          formattedDate = timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
           timeLabel = formattedDate;
+        } else if (daysDiff <= 365) {
+          // 1年的跨度，X轴主要显示月份和日期
+          formattedDate = timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+          formattedTime = ''; // 长时间跨度隐藏具体时间
+          timeLabel = timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         } else {
-          formattedDate = timestamp.toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric',
-          });
-          formattedTime = timestamp.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
+          // 3年的跨度，X轴主要显示年份和月份
+          formattedDate = timestamp.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+          formattedTime = '';
           timeLabel = formattedDate;
         }
 
@@ -169,7 +176,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
     } finally {
       setLoading(false);
     }
-  }, [days, limit]);
+  }, [activeRange.days, limit]);
 
   useEffect(() => {
     fetchSnapshots();
@@ -179,7 +186,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
     return () => clearInterval(interval);
   }, [fetchSnapshots, refreshTrigger]);
 
-  // Custom tooltip component
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const data = payload[0].payload as ChartData;
@@ -193,7 +199,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
       return (
         <div className="rounded-lg border bg-card/95 backdrop-blur-sm p-3 shadow-xl ring-1 ring-border">
           <p className="text-xs font-medium text-muted-foreground mb-1">
-            {data.formattedDate} {data.formattedTime}
+            {data.formattedDate} {data.formattedTime && data.formattedTime}
           </p>
           <p className="text-xl font-bold mb-1">
             {baseCurrency} {data.value.toLocaleString('en-US', {
@@ -215,7 +221,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
     return null;
   };
 
-  // Format Y-axis values
   const formatYAxis = (value: number) => {
     if (value >= 1000000) {
       return `$${(value / 1000000).toFixed(1)}M`;
@@ -225,7 +230,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
     return `$${value.toFixed(0)}`;
   };
 
-  // Calculate stats
   const latestValue = chartData.length > 0 ? chartData[chartData.length - 1].value : 0;
   const firstValue = chartData.length > 0 ? chartData[0].value : 0;
   const totalChange = latestValue - firstValue;
@@ -234,7 +238,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <CardTitle className="flex items-center gap-2">
               Net Worth
@@ -244,7 +248,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
                 </span>
               )}
             </CardTitle>
-            <CardDescription className="flex items-center gap-2 flex-wrap">
+            <CardDescription className="flex items-center gap-2 flex-wrap mt-1">
               Portfolio value over time
               {chartData.length > 1 && (
                 <span className={`text-sm font-medium ${totalChange >= 0 ? 'text-green-500' : 'text-red-500'}`}>
@@ -258,16 +262,36 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
               )}
             </CardDescription>
           </div>
-          <Button 
-            variant="outline" 
-            size="icon"
-            onClick={fetchSnapshots}
-            disabled={loading}
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          </Button>
+          
+          {/* 新增：时间跨度切换器 */}
+          <div className="flex items-center gap-2">
+            <div className="flex bg-muted/50 rounded-md p-1">
+              {TIME_RANGES.map((range) => (
+                <Button
+                  key={range.label}
+                  variant={activeRange.label === range.label ? "secondary" : "ghost"}
+                  size="sm"
+                  className={`h-7 px-3 text-xs ${activeRange.label === range.label ? 'shadow-sm font-medium' : 'text-muted-foreground'}`}
+                  onClick={() => setActiveRange(range)}
+                  disabled={loading}
+                >
+                  {range.label}
+                </Button>
+              ))}
+            </div>
+            <Button 
+              variant="outline" 
+              size="icon"
+              className="h-8 w-8"
+              onClick={fetchSnapshots}
+              disabled={loading}
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </Button>
+          </div>
         </div>
       </CardHeader>
+      
       <CardContent>
         {loading && (
           <div className="flex h-[400px] items-center justify-center">
@@ -280,11 +304,6 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
             <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive max-w-md">
               <p className="font-semibold mb-2">Error loading chart data</p>
               <p className="text-xs">{error}</p>
-              {error.includes('table') && (
-                <p className="text-xs mt-2 text-muted-foreground">
-                  Please ensure the database migration has been run in Supabase.
-                </p>
-              )}
             </div>
           </div>
         )}
@@ -294,7 +313,7 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
             <div className="text-center max-w-sm">
               <p className="text-muted-foreground mb-2">No snapshots yet</p>
               <p className="text-sm text-muted-foreground">
-                Portfolio value is recorded periodically by the cron job. Add transactions and wait for the next run, or trigger a manual snapshot via the API.
+                Portfolio value is recorded periodically by the cron job. Add transactions and wait for the next run.
               </p>
             </div>
           </div>
@@ -326,7 +345,8 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
                 tickLine={false}
                 axisLine={false}
                 tickMargin={8}
-                interval="preserveStartEnd"
+                // 自动调整 X 轴标签密度以防止重叠
+                minTickGap={30}
               />
               <YAxis
                 stroke="hsl(var(--muted-foreground))"
@@ -336,6 +356,8 @@ export function NetWorthChart({ days = 30, limit, refreshTrigger }: NetWorthChar
                 tickFormatter={formatYAxis}
                 tickMargin={8}
                 width={60}
+                // 动态调整 Y 轴范围，使波动更明显
+                domain={['dataMin * 0.95', 'dataMax * 1.05']}
               />
               <Tooltip 
                 content={<CustomTooltip />}
