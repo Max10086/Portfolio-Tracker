@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -38,7 +38,7 @@ export function AddAssetDialog({
   const [marketType, setMarketType] = useState<MarketType | ''>('');
   const [symbol, setSymbol] = useState('');
   const [cashCurrency, setCashCurrency] = useState<CashCurrency>('USD');
-  const [quantity, setQuantity] = useState('');
+  const[quantity, setQuantity] = useState('');
   const [transactionType, setTransactionType] = useState<TransactionType>('BUY');
   const [transactionDate, setTransactionDate] = useState(
     new Date().toISOString().split('T')[0]
@@ -68,14 +68,29 @@ export function AddAssetDialog({
     }
   }, [marketType]);
 
+  // 1. 定义强制获取最新现金余额的函数（添加时间戳和无缓存请求头）
+  const fetchLatestCashAssets = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/cash-assets?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+      });
+      const data = res.ok ? await res.json() : { cashAssets:[] };
+      setCashAssets(data.cashAssets ||[]);
+    } catch (error) {
+      setCashAssets([]);
+    }
+  },[]);
+
+  // 2. 在弹窗打开时调用该函数
   useEffect(() => {
     if (open) {
-      fetch('/api/cash-assets')
-        .then((res) => res.ok ? res.json() : { cashAssets: [] })
-        .then((data) => setCashAssets(data.cashAssets || []))
-        .catch(() => setCashAssets([]));
+      fetchLatestCashAssets();
     }
-  }, [open]);
+  },[open, fetchLatestCashAssets]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -140,6 +155,10 @@ export function AddAssetDialog({
       setUpdateCashBalance(true);
       setCashAssetSymbol('USD');
       setError(null);
+      
+      // 3. 提交成功后，主动刷新一次现金余额，保证弹窗不关闭时数据也是最新的
+      fetchLatestCashAssets();
+      
       onAssetAdded();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

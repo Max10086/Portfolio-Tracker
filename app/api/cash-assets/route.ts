@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 
+export const dynamic = 'force-dynamic';
 /**
  * GET /api/cash-assets
  * Returns available cash holdings for the "Update Cash Balance" dropdown.
