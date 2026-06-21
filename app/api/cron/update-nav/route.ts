@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
 
+const RETRY_ATTEMPTS = 6;
+const RETRY_DELAY_MS = 3000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * API Route: POST /api/cron/update-nav
  *
@@ -74,19 +79,34 @@ export async function POST(request: NextRequest) {
         quantity: h.quantity,
       }));
 
-      try {
-        const result = await calculatePortfolioTotal({
-          assets,
-          baseCurrency,
-          failOnPriceError: true,
-        });
-        totalValue = result.totalValue;
-      } catch (err) {
-        console.error('Error calculating portfolio total:', err);
+      let lastError: unknown = null;
+      for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+        try {
+          const result = await calculatePortfolioTotal({
+            assets,
+            baseCurrency,
+            failOnPriceError: true,
+          });
+          totalValue = result.totalValue;
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+          console.error(
+            `Error calculating portfolio total (attempt ${attempt}/${RETRY_ATTEMPTS}):`,
+            err
+          );
+          if (attempt < RETRY_ATTEMPTS) {
+            await sleep(RETRY_DELAY_MS);
+          }
+        }
+      }
+
+      if (lastError) {
         return NextResponse.json(
           {
-            error: 'Failed to calculate portfolio total',
-            details: err instanceof Error ? err.message : 'Unknown error',
+            error: 'Failed to calculate portfolio total after retries',
+            details: lastError instanceof Error ? lastError.message : 'Unknown error',
           },
           { status: 500 }
         );

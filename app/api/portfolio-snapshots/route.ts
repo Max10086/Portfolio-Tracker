@@ -78,43 +78,77 @@ export async function GET(request: NextRequest) {
     const limit = searchParams.get('limit');
     const baseCurrency = process.env.BASE_CURRENCY || 'USD';
 
-    let query = supabase
-      .from('portfolio_snapshots')
-      .select('id, total_value, recorded_at')
-      .order('recorded_at', { ascending: true });
+    const PAGE_SIZE = 1000;
+    const MAX_ROWS = 20000;
 
-    if (days) {
-      const daysNum = parseInt(days, 10);
-      if (!isNaN(daysNum) && daysNum > 0) {
-        const cutoffDate = new Date();
-        cutoffDate.setDate(cutoffDate.getDate() - daysNum);
-        query = query.gte('recorded_at', cutoffDate.toISOString());
+    const buildBaseQuery = () => {
+      let q = supabase
+        .from('portfolio_snapshots')
+        .select('id, total_value, recorded_at')
+        // Query latest records first to avoid truncation on large datasets.
+        .order('recorded_at', { ascending: false });
+
+      if (days) {
+        const daysNum = parseInt(days, 10);
+        if (!isNaN(daysNum) && daysNum > 0) {
+          const cutoffDate = new Date();
+          cutoffDate.setDate(cutoffDate.getDate() - daysNum);
+          q = q.gte('recorded_at', cutoffDate.toISOString());
+        }
+      }
+
+      return q;
+    };
+
+    const limitNum = limit ? parseInt(limit, 10) : NaN;
+    const hasValidLimit = !isNaN(limitNum) && limitNum > 0;
+
+    let snapshots: Array<{ id: string; total_value: number; recorded_at: string }> = [];
+
+    if (hasValidLimit && limitNum <= PAGE_SIZE) {
+      const { data, error } = await buildBaseQuery().limit(limitNum);
+      if (error) {
+        console.error('Error fetching portfolio snapshots:', error);
+        return NextResponse.json(
+          { error: 'Failed to fetch snapshots', details: error.message },
+          { status: 500 }
+        );
+      }
+      snapshots = data || [];
+    } else {
+      for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
+        const to = offset + PAGE_SIZE - 1;
+        const { data, error } = await buildBaseQuery().range(offset, to);
+        if (error) {
+          console.error('Error fetching portfolio snapshots:', error);
+          return NextResponse.json(
+            { error: 'Failed to fetch snapshots', details: error.message },
+            { status: 500 }
+          );
+        }
+
+        const batch = data || [];
+        snapshots.push(...batch);
+
+        if (batch.length < PAGE_SIZE) break;
+        if (hasValidLimit && snapshots.length >= limitNum) break;
+      }
+
+      if (hasValidLimit && snapshots.length > limitNum) {
+        snapshots = snapshots.slice(0, limitNum);
       }
     }
 
-    if (limit) {
-      const limitNum = parseInt(limit, 10);
-      if (!isNaN(limitNum) && limitNum > 0) {
-        query = query.limit(limitNum);
-      }
-    }
-
-    const { data: snapshots, error } = await query;
-
-    if (error) {
-      console.error('Error fetching portfolio snapshots:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch snapshots', details: error.message },
-        { status: 500 }
-      );
-    }
+    const normalizedSnapshots = (snapshots || []).slice().sort((a, b) =>
+      new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+    );
 
     return NextResponse.json({
-      snapshots: snapshots || [],
+      snapshots: normalizedSnapshots,
       baseCurrency,
       source: 'stored',
       message:
-        (snapshots?.length ?? 0) === 0
+        normalizedSnapshots.length === 0
           ? 'No snapshots yet. The cron job records portfolio value periodically. Add transactions and wait for the next snapshot, or use "Record Snapshot" to capture manually.'
           : undefined,
     });

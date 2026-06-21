@@ -28,6 +28,137 @@ interface ChartData {
   formattedTime: string;
 }
 
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+
+function downsampleByInterval(
+  snapshots: PortfolioSnapshot[],
+  intervalMs: number
+): PortfolioSnapshot[] {
+  if (snapshots.length <= 2) return snapshots;
+
+  const bucketMap = new Map<number, PortfolioSnapshot>();
+  for (const snapshot of snapshots) {
+    const time = new Date(snapshot.recorded_at).getTime();
+    const bucket = Math.floor(time / intervalMs);
+    bucketMap.set(bucket, snapshot);
+  }
+
+  return Array.from(bucketMap.values()).sort(
+    (a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+  );
+}
+
+function smoothTransientNegativeSpikes(snapshots: PortfolioSnapshot[]): PortfolioSnapshot[] {
+  if (snapshots.length < 3) return snapshots;
+
+  const smoothed = snapshots.map((snapshot) => ({
+    ...snapshot,
+    total_value: Number(snapshot.total_value),
+  }));
+
+  for (let i = 1; i < smoothed.length - 1; i++) {
+    const left = smoothed[i - 1];
+    const leftValue = Number(left.total_value);
+    if (leftValue <= 0) continue;
+
+    const firstDip = Number(smoothed[i].total_value);
+    if (firstDip >= leftValue * 0.92) continue;
+
+    const leftTime = new Date(left.recorded_at).getTime();
+    let recoveryIndex = -1;
+
+    for (let j = i + 1; j < smoothed.length; j++) {
+      const elapsed = new Date(smoothed[j].recorded_at).getTime() - leftTime;
+      if (elapsed > EIGHT_HOURS_MS) break;
+      if (Number(smoothed[j].total_value) >= leftValue * 0.97) {
+        recoveryIndex = j;
+        break;
+      }
+    }
+
+    if (recoveryIndex === -1) continue;
+
+    const dipSegment = smoothed.slice(i, recoveryIndex);
+    const minValue = Math.min(...dipSegment.map((point) => Number(point.total_value)));
+    const dropAmount = leftValue - minValue;
+    const dropRatio = dropAmount / leftValue;
+
+    if (dropAmount < 1500 && dropRatio < 0.08) continue;
+
+    const right = smoothed[recoveryIndex];
+    const rightValue = Number(right.total_value);
+    const rightTime = new Date(right.recorded_at).getTime();
+    const totalDuration = rightTime - leftTime || 1;
+
+    for (let k = i; k < recoveryIndex; k++) {
+      const t = (new Date(smoothed[k].recorded_at).getTime() - leftTime) / totalDuration;
+      smoothed[k] = {
+        ...smoothed[k],
+        total_value: leftValue + (rightValue - leftValue) * t,
+      };
+    }
+
+    i = recoveryIndex - 1;
+  }
+
+  return smoothed;
+}
+
+function suppressShortLivedDrops(
+  snapshots: PortfolioSnapshot[],
+  maxDropDurationMs: number
+): PortfolioSnapshot[] {
+  if (snapshots.length < 4) return snapshots;
+
+  const result = snapshots.map((snapshot) => ({
+    ...snapshot,
+    total_value: Number(snapshot.total_value),
+  }));
+
+  for (let i = 1; i < result.length - 2; i++) {
+    const left = result[i - 1];
+    const leftValue = Number(left.total_value);
+    if (leftValue <= 0) continue;
+
+    const currValue = Number(result[i].total_value);
+    const dropAmount = leftValue - currValue;
+    const dropRatio = dropAmount / leftValue;
+    if (dropAmount < 3000 && dropRatio < 0.05) continue;
+
+    const leftTime = new Date(left.recorded_at).getTime();
+    let recoverAt = -1;
+
+    for (let j = i + 1; j < result.length; j++) {
+      const elapsed = new Date(result[j].recorded_at).getTime() - leftTime;
+      if (elapsed > maxDropDurationMs) break;
+      if (Number(result[j].total_value) >= leftValue * 0.95) {
+        recoverAt = j;
+        break;
+      }
+    }
+
+    if (recoverAt === -1) continue;
+
+    const right = result[recoverAt];
+    const rightValue = Number(right.total_value);
+    const rightTime = new Date(right.recorded_at).getTime();
+    const totalDuration = rightTime - leftTime || 1;
+
+    for (let k = i; k < recoverAt; k++) {
+      const t = (new Date(result[k].recorded_at).getTime() - leftTime) / totalDuration;
+      result[k] = {
+        ...result[k],
+        total_value: leftValue + (rightValue - leftValue) * t,
+      };
+    }
+
+    i = recoverAt - 1;
+  }
+
+  return result;
+}
+
 function smoothIsolatedNegativeSpikes(data: ChartData[]): ChartData[] {
   if (data.length < 3) return data;
 
@@ -133,7 +264,10 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         return;
       }
 
-      let processedSnapshots = [...data.snapshots];
+      let processedSnapshots = [...data.snapshots].sort(
+        (a: PortfolioSnapshot, b: PortfolioSnapshot) =>
+          new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+      );
       const latestSnapshot = processedSnapshots[processedSnapshots.length - 1];
       const latestTimestamp = latestSnapshot ? new Date(latestSnapshot.recorded_at).getTime() : 0;
       const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
@@ -161,7 +295,12 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         }
       }
 
-      // 💡 降采样逻辑 (Downsampling)：如果请求超过 30 天的数据，每天只保留 1 个最新数据点
+      // 7D 视图降采样为每 6 小时一个点，减少高频噪音
+      if (activeRange.days <= 7) {
+        processedSnapshots = downsampleByInterval(processedSnapshots, SIX_HOURS_MS);
+      }
+
+      // 长周期视图按天保留一个点（缺失日期不做插值补点）
       if (activeRange.days > 30) {
         const dailyMap = new Map<string, PortfolioSnapshot>();
         processedSnapshots.forEach((snap: PortfolioSnapshot) => {
@@ -170,13 +309,20 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
           const dateKey = date.toISOString().slice(0, 10);
           dailyMap.set(dateKey, snap);
         });
-        processedSnapshots = Array.from(dailyMap.values());
+        processedSnapshots = Array.from(dailyMap.values()).sort(
+          (a: PortfolioSnapshot, b: PortfolioSnapshot) =>
+            new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+        );
       }
 
       processedSnapshots.sort(
         (a: PortfolioSnapshot, b: PortfolioSnapshot) =>
           new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
       );
+      processedSnapshots = smoothTransientNegativeSpikes(processedSnapshots);
+      if (activeRange.days <= 30) {
+        processedSnapshots = suppressShortLivedDrops(processedSnapshots, 6 * 60 * 60 * 1000);
+      }
 
       // Transform data for chart
       const transformed: ChartData[] = processedSnapshots.map((snapshot: PortfolioSnapshot) => {
