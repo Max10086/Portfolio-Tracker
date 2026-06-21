@@ -75,7 +75,11 @@ export async function POST(request: NextRequest) {
       }));
 
       try {
-        const result = await calculatePortfolioTotal({ assets, baseCurrency });
+        const result = await calculatePortfolioTotal({
+          assets,
+          baseCurrency,
+          failOnPriceError: true,
+        });
         totalValue = result.totalValue;
       } catch (err) {
         console.error('Error calculating portfolio total:', err);

@@ -236,6 +236,12 @@ export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
         open={isDialogOpen}
         onOpenChange={setIsDialogOpen}
         onAssetAdded={handleAssetAdded}
+        existingHoldings={holdings?.assets.map((asset) => ({
+          symbol: asset.symbol,
+          market_type: asset.market_type,
+          quantity: Number(asset.quantity),
+          name: asset.name,
+        })) || []}
       />
     </Card>
   );

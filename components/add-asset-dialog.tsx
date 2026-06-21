@@ -28,12 +28,19 @@ interface AddAssetDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAssetAdded: () => void;
+  existingHoldings: Array<{
+    symbol: string;
+    market_type: MarketType;
+    quantity: number;
+    name?: string;
+  }>;
 }
 
 export function AddAssetDialog({
   open,
   onOpenChange,
   onAssetAdded,
+  existingHoldings,
 }: AddAssetDialogProps) {
   const [marketType, setMarketType] = useState<MarketType | ''>('');
   const [symbol, setSymbol] = useState('');
@@ -51,9 +58,15 @@ export function AddAssetDialog({
   const [updateCashBalance, setUpdateCashBalance] = useState(true);
   const [cashAssetSymbol, setCashAssetSymbol] = useState<CashCurrency>('USD');
   const [cashAssets, setCashAssets] = useState<Array<{ symbol: string; quantity: number; label: string }>>([]);
+  const [selectedHoldingKey, setSelectedHoldingKey] = useState<string>('manual');
 
   const isCash = marketType === 'CASH';
   const showCashOptions = updateCashBalance && !isCash;
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const currentHolding = existingHoldings.find(
+    (h) => h.market_type === marketType && h.symbol.toUpperCase() === (isCash ? cashCurrency : normalizedSymbol)
+  );
+  const sellMaxQuantity = currentHolding?.quantity ?? 0;
 
   // Default cash asset to match asset currency
   const defaultCashForMarket = (mt: MarketType | ''): CashCurrency => {
@@ -114,6 +127,11 @@ export function AddAssetDialog({
       return;
     }
 
+    if (transactionType === 'SELL' && !isCash && currentHolding && quantityNum > sellMaxQuantity) {
+      setError(`Sell quantity exceeds holdings. Current holdings: ${sellMaxQuantity.toLocaleString('en-US')}`);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -154,6 +172,7 @@ export function AddAssetDialog({
       setTag('');
       setUpdateCashBalance(true);
       setCashAssetSymbol('USD');
+      setSelectedHoldingKey('manual');
       setError(null);
       
       // 3. 提交成功后，主动刷新一次现金余额，保证弹窗不关闭时数据也是最新的
@@ -183,6 +202,7 @@ export function AddAssetDialog({
         setTag('');
         setUpdateCashBalance(true);
         setCashAssetSymbol('USD');
+        setSelectedHoldingKey('manual');
         setError(null);
       }
     }
@@ -222,6 +242,52 @@ export function AddAssetDialog({
               </div>
             </div>
 
+            {/* Quick Select Existing Holding */}
+            <div className="grid gap-2">
+              <Label htmlFor="existing-holding">Quick Select Existing Holding</Label>
+              <Select
+                value={selectedHoldingKey}
+                onValueChange={(value) => {
+                  setSelectedHoldingKey(value);
+                  if (value === 'manual') return;
+                  const selected = existingHoldings.find(
+                    (h) => `${h.market_type}:${h.symbol.toUpperCase()}` === value
+                  );
+                  if (!selected) return;
+                  setMarketType(selected.market_type);
+                  if (selected.market_type === 'CASH') {
+                    const cash = selected.symbol.toUpperCase() as CashCurrency;
+                    setCashCurrency(cash);
+                    setSymbol('');
+                  } else {
+                    setSymbol(selected.symbol.toUpperCase());
+                  }
+                  if (transactionType === 'SELL') {
+                    setQuantity(String(selected.quantity));
+                  }
+                }}
+              >
+                <SelectTrigger id="existing-holding">
+                  <SelectValue placeholder="Select existing holding (optional)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">Manual input</SelectItem>
+                  {existingHoldings
+                    .filter((h) => h.quantity > 0)
+                    .map((h) => (
+                      <SelectItem
+                        key={`${h.market_type}:${h.symbol}`}
+                        value={`${h.market_type}:${h.symbol.toUpperCase()}`}
+                      >
+                        {h.symbol}
+                        {h.name ? ` - ${h.name}` : ''}
+                        {` (${h.market_type}) - holding: ${h.quantity.toLocaleString('en-US', { maximumFractionDigits: 8 })}`}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             {/* Asset Type */}
             <div className="grid gap-2">
               <Label htmlFor="market-type">Asset Type</Label>
@@ -252,7 +318,10 @@ export function AddAssetDialog({
                 <Label htmlFor="cash-currency">Currency</Label>
                 <Select
                   value={cashCurrency}
-                  onValueChange={(value) => setCashCurrency(value as CashCurrency)}
+                  onValueChange={(value) => {
+                    setCashCurrency(value as CashCurrency);
+                    setSelectedHoldingKey('manual');
+                  }}
                 >
                   <SelectTrigger id="cash-currency">
                     <SelectValue placeholder="Select currency" />
@@ -271,7 +340,10 @@ export function AddAssetDialog({
                   id="symbol"
                   placeholder="e.g., AAPL, 600519, BTC"
                   value={symbol}
-                  onChange={(e) => setSymbol(e.target.value)}
+                  onChange={(e) => {
+                    setSymbol(e.target.value);
+                    setSelectedHoldingKey('manual');
+                  }}
                   disabled={loading}
                 />
               </div>
@@ -279,17 +351,38 @@ export function AddAssetDialog({
 
             {/* Quantity */}
             <div className="grid gap-2">
-              <Label htmlFor="quantity">Quantity</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="quantity">Quantity</Label>
+                {transactionType === 'SELL' && !isCash && currentHolding && (
+                  <span className="text-xs text-muted-foreground">
+                    Available: {currentHolding.quantity.toLocaleString('en-US', { maximumFractionDigits: 8 })}
+                  </span>
+                )}
+              </div>
               <Input
                 id="quantity"
                 type="number"
                 step="any"
                 min="0"
+                max={transactionType === 'SELL' && !isCash && currentHolding ? currentHolding.quantity : undefined}
                 placeholder="0.00"
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
                 disabled={loading}
               />
+              {transactionType === 'SELL' && !isCash && currentHolding && (
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setQuantity((currentHolding.quantity * 0.25).toString())}>
+                    25%
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setQuantity((currentHolding.quantity * 0.5).toString())}>
+                    50%
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setQuantity(String(currentHolding.quantity))}>
+                    Max
+                  </Button>
+                </div>
+              )}
             </div>
 
             {/* Transaction Date */}

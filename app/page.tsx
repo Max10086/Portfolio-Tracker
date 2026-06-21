@@ -65,7 +65,7 @@ export default function Home() {
   }, [fetchHoldings]);
 
   return (
-    <main className="container mx-auto py-8 px-4">
+    <main className="mx-auto w-full max-w-[1800px] py-8 px-6">
       <div className="mb-8">
         <h1 className="text-4xl font-bold tracking-tight">Portfolio Tracker</h1>
         <p className="text-muted-foreground mt-2">
@@ -75,7 +75,7 @@ export default function Home() {
       
       <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-2">
         <div className="lg:col-span-2">
-          <NetWorthChart days={30} refreshTrigger={refreshKey} />
+          <NetWorthChart defaultDays={30} refreshTrigger={refreshKey} />
         </div>
         <div className="lg:col-span-1">
           <AllocationPieChart 

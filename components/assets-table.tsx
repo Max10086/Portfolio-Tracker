@@ -107,6 +107,8 @@ export function AssetsTable({ assets, baseCurrency = 'USD', onTagUpdated }: Asse
     return null;
   }
 
+  const totalValue = assets.reduce((sum, asset) => sum + (asset.value && asset.value > 0 ? asset.value : 0), 0);
+
   return (
     <>
       <div className="rounded-md border">
@@ -120,6 +122,7 @@ export function AssetsTable({ assets, baseCurrency = 'USD', onTagUpdated }: Asse
               <TableHead className="text-right">Quantity</TableHead>
               <TableHead className="text-right">Current Price</TableHead>
               <TableHead className="text-right">Total Value ({baseCurrency})</TableHead>
+              <TableHead className="text-right">Allocation</TableHead>
               <TableHead className="w-[60px]"></TableHead>
             </TableRow>
           </TableHeader>
@@ -156,6 +159,15 @@ export function AssetsTable({ assets, baseCurrency = 'USD', onTagUpdated }: Asse
                     : (
                         <span className="text-muted-foreground">-</span>
                       )}
+                </TableCell>
+                <TableCell className="text-right">
+                  {asset.value !== undefined && asset.value > 0 && totalValue > 0 ? (
+                    <span className="font-medium">
+                      {((asset.value / totalValue) * 100).toFixed(2)}%
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
+                  )}
                 </TableCell>
                 <TableCell>
                   <Button

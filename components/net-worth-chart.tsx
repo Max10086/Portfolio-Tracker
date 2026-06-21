@@ -28,6 +28,32 @@ interface ChartData {
   formattedTime: string;
 }
 
+function smoothIsolatedNegativeSpikes(data: ChartData[]): ChartData[] {
+  if (data.length < 3) return data;
+
+  const smoothed = [...data];
+  for (let i = 1; i < data.length - 1; i++) {
+    const prev = smoothed[i - 1];
+    const curr = smoothed[i];
+    const next = smoothed[i + 1];
+
+    if (prev.value <= 0 || next.value <= 0) continue;
+
+    const baseline = Math.min(prev.value, next.value);
+    const hasSharpDrop = curr.value < baseline * 0.7;
+    const quickRecovery = Math.abs(next.value - prev.value) / prev.value < 0.2;
+
+    if (hasSharpDrop && quickRecovery) {
+      smoothed[i] = {
+        ...curr,
+        value: (prev.value + next.value) / 2,
+      };
+    }
+  }
+
+  return smoothed;
+}
+
 interface NetWorthChartProps {
   defaultDays?: number; // 改为 defaultDays
   limit?: number;
@@ -107,19 +133,50 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         return;
       }
 
-      let processedSnapshots = data.snapshots;
+      let processedSnapshots = [...data.snapshots];
+      const latestSnapshot = processedSnapshots[processedSnapshots.length - 1];
+      const latestTimestamp = latestSnapshot ? new Date(latestSnapshot.recorded_at).getTime() : 0;
+      const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000;
+
+      // Keep chart endpoint up-to-date even when cron missed recent runs.
+      if (latestTimestamp < twelveHoursAgo) {
+        try {
+          const liveResponse = await fetch('/api/transactions?view=holdings', {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache' },
+          });
+          if (liveResponse.ok) {
+            const liveData = await liveResponse.json();
+            const liveTotal = Number(liveData.totalValue);
+            if (!Number.isNaN(liveTotal) && liveTotal > 0) {
+              processedSnapshots.push({
+                id: 'live-current',
+                total_value: liveTotal,
+                recorded_at: new Date().toISOString(),
+              });
+            }
+          }
+        } catch (liveError) {
+          console.warn('Failed to append live portfolio point:', liveError);
+        }
+      }
 
       // 💡 降采样逻辑 (Downsampling)：如果请求超过 30 天的数据，每天只保留 1 个最新数据点
       if (activeRange.days > 30) {
-        const dailyMap = new Map();
+        const dailyMap = new Map<string, PortfolioSnapshot>();
         processedSnapshots.forEach((snap: PortfolioSnapshot) => {
           const date = new Date(snap.recorded_at);
-          // 使用 YYYY-MM-DD 作为 key，后遍历到的（当天的最后一个小时）会覆盖前面的
-          const dateKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+          // 使用 UTC 日期作为 key，后遍历到的快照（当天更晚时间）会覆盖前面的
+          const dateKey = date.toISOString().slice(0, 10);
           dailyMap.set(dateKey, snap);
         });
         processedSnapshots = Array.from(dailyMap.values());
       }
+
+      processedSnapshots.sort(
+        (a: PortfolioSnapshot, b: PortfolioSnapshot) =>
+          new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+      );
 
       // Transform data for chart
       const transformed: ChartData[] = processedSnapshots.map((snapshot: PortfolioSnapshot) => {
@@ -170,7 +227,7 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         };
       });
 
-      setChartData(transformed);
+      setChartData(smoothIsolatedNegativeSpikes(transformed));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -345,6 +402,7 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
                 tickLine={false}
                 axisLine={false}
                 tickMargin={8}
+                interval="preserveStartEnd"
                 // 自动调整 X 轴标签密度以防止重叠
                 minTickGap={30}
               />

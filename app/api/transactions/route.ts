@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
-import { calculatePortfolioTotal, type Asset } from '@/lib/price-service';
+import { calculatePortfolioTotal, CurrencyConverter, type Asset } from '@/lib/price-service';
 
 
 
@@ -310,6 +310,7 @@ export async function POST(request: NextRequest) {
     const shouldUpdateCash = update_cash_balance && market_type !== 'CASH' && cash_asset_symbol;
     let transactionValue = 0;
     let transactionCurrency = 'USD';
+    let cashReconciliationValue = 0;
 
     if (shouldUpdateCash) {
       const validCashSymbols = ['USD', 'CNY', 'HKD'];
@@ -332,12 +333,24 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Validate cash currency matches asset currency
+      cashReconciliationValue = transactionValue;
       if (transactionCurrency !== cashSymbol) {
-        return NextResponse.json(
-          { error: `Transaction is in ${transactionCurrency}. Please select ${transactionCurrency} Cash to reconcile.` },
-          { status: 400 }
-        );
+        try {
+          const converter = new CurrencyConverter();
+          cashReconciliationValue = await converter.convert(
+            transactionValue,
+            transactionCurrency,
+            cashSymbol
+          );
+        } catch (conversionError) {
+          return NextResponse.json(
+            {
+              error: `Failed to convert ${transactionCurrency} to ${cashSymbol} for cash reconciliation.`,
+              details: conversionError instanceof Error ? conversionError.message : 'Unknown conversion error',
+            },
+            { status: 400 }
+          );
+        }
       }
 
       // For BUY: validate sufficient cash balance
@@ -350,9 +363,11 @@ export async function POST(request: NextRequest) {
           .maybeSingle();
 
         const cashBalance = Number(cashHolding?.quantity ?? 0);
-        if (cashBalance < transactionValue) {
+        if (cashBalance < cashReconciliationValue) {
           return NextResponse.json(
-            { error: `Insufficient ${cashSymbol} balance. Required: ${transactionValue.toFixed(2)}, Available: ${cashBalance.toFixed(2)}` },
+            {
+              error: `Insufficient ${cashSymbol} balance. Required: ${cashReconciliationValue.toFixed(2)}, Available: ${cashBalance.toFixed(2)}`,
+            },
             { status: 400 }
           );
         }
@@ -375,7 +390,7 @@ export async function POST(request: NextRequest) {
         p_transaction_date: txDate,
         p_notes: notes || null,
         p_cash_symbol: String(cash_asset_symbol).trim().toUpperCase(),
-        p_cash_quantity: transactionValue,
+        p_cash_quantity: cashReconciliationValue,
       });
 
       if (rpcError) {

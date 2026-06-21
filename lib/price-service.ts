@@ -37,6 +37,11 @@ class PriceCache {
     return null;
   }
 
+  getStale(symbol: string): PriceResult | null {
+    const cached = this.cache.get(symbol.toUpperCase());
+    return cached ? cached.result : null;
+  }
+
   set(symbol: string, result: PriceResult): void {
     this.cache.set(symbol.toUpperCase(), {
       result,
@@ -150,6 +155,11 @@ class USStockFetcherImpl {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[USStockFetcher] Yahoo Finance fallback failed for ${symbol}:`, errorMessage);
+      const stale = priceCache.getStale(cacheKey);
+      if (stale) {
+        console.warn(`[USStockFetcher] Using stale cached price for ${symbol}`);
+        return stale;
+      }
       throw new Error(`Failed to fetch US stock price for ${symbol}: ${errorMessage}`);
     }
   }
@@ -264,6 +274,11 @@ export class CNStockFetcher extends TencentFinanceFetcher implements PriceFetche
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[CNStockFetcher] Failed to fetch ${symbol}:`, errorMessage);
+      const stale = priceCache.getStale(cacheKey);
+      if (stale) {
+        console.warn(`[CNStockFetcher] Using stale cached price for ${symbol}`);
+        return stale;
+      }
       throw new Error(`Failed to fetch CN stock price for ${symbol}: ${errorMessage}`);
     }
   }
@@ -317,6 +332,11 @@ export class HKStockFetcher extends TencentFinanceFetcher implements PriceFetche
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[HKStockFetcher] Failed to fetch ${symbol}:`, errorMessage);
+      const stale = priceCache.getStale(cacheKey);
+      if (stale) {
+        console.warn(`[HKStockFetcher] Using stale cached price for ${symbol}`);
+        return stale;
+      }
       throw new Error(`Failed to fetch HK stock price for ${symbol}: ${errorMessage}`);
     }
   }
@@ -382,6 +402,11 @@ export class CryptoFetcher implements PriceFetcher {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[CryptoFetcher] Failed to fetch ${symbol}:`, errorMessage);
+      const stale = priceCache.getStale(cacheKey);
+      if (stale) {
+        console.warn(`[CryptoFetcher] Using stale cached price for ${symbol}`);
+        return stale;
+      }
       throw new Error(`Failed to fetch crypto price for ${symbol}: ${errorMessage}`);
     }
   }
@@ -438,6 +463,8 @@ export class CryptoFetcher implements PriceFetcher {
     const symbolMap: Record<string, string> = {
       'btc': 'bitcoin',
       'eth': 'ethereum',
+      'usdt': 'tether',
+      'usdc': 'usd-coin',
       'bnb': 'binancecoin',
       'sol': 'solana',
       'ada': 'cardano',
@@ -631,11 +658,16 @@ class PriceFetcherFactory {
 export interface CalculatePortfolioTotalOptions {
   baseCurrency?: string;
   assets: Asset[];
+  failOnPriceError?: boolean;
 }
 
 export interface PortfolioCalculationResult {
   totalValue: number;
   baseCurrency: string;
+  failedAssets: Array<{
+    asset: Asset;
+    reason: string;
+  }>;
   assetDetails: Array<{
     asset: Asset;
     price: number;
@@ -648,11 +680,12 @@ export interface PortfolioCalculationResult {
 export async function calculatePortfolioTotal(
   options: CalculatePortfolioTotalOptions
 ): Promise<PortfolioCalculationResult> {
-  const { assets, baseCurrency = 'USD' } = options;
+  const { assets, baseCurrency = 'USD', failOnPriceError = false } = options;
   const factory = new PriceFetcherFactory();
   const converter = new CurrencyConverter();
 
   const assetDetails: PortfolioCalculationResult['assetDetails'] = [];
+  const failedAssets: PortfolioCalculationResult['failedAssets'] = [];
   let totalValue = 0;
 
   // Process assets sequentially with delay to avoid rate limiting
@@ -682,6 +715,8 @@ export async function calculatePortfolioTotal(
       await delay(200);
     } catch (error) {
       console.error(`Error processing asset ${asset.symbol}:`, error);
+      const reason = error instanceof Error ? error.message : 'Unknown error';
+      failedAssets.push({ asset, reason });
       // Add asset with zero value for failed fetches
       assetDetails.push({
         asset,
@@ -692,9 +727,15 @@ export async function calculatePortfolioTotal(
     }
   }
 
+  if (failOnPriceError && failedAssets.length > 0) {
+    const failedSymbols = failedAssets.map((f) => f.asset.symbol).join(', ');
+    throw new Error(`Price fetch failed for assets: ${failedSymbols}`);
+  }
+
   return {
     totalValue: Math.round(totalValue * 100) / 100,
     baseCurrency,
+    failedAssets,
     assetDetails,
   };
 }
