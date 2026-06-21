@@ -687,12 +687,58 @@ export async function calculatePortfolioTotal(
   const assetDetails: PortfolioCalculationResult['assetDetails'] = [];
   const failedAssets: PortfolioCalculationResult['failedAssets'] = [];
   let totalValue = 0;
+  const CRYPTO_RETRY_ATTEMPTS = 8;
+  const CRYPTO_RETRY_DELAY_MS = 1200;
 
   // Process assets sequentially with delay to avoid rate limiting
   for (const asset of assets) {
     try {
       const fetcher = factory.getFetcher(asset.market_type);
-      const priceResult = await fetcher.fetchPrice(asset.symbol);
+      let priceResult: PriceResult | null = null;
+
+      if (asset.market_type === 'CRYPTO') {
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= CRYPTO_RETRY_ATTEMPTS; attempt++) {
+          try {
+            const candidate = await fetcher.fetchPrice(asset.symbol);
+            if (!Number.isFinite(candidate.price) || candidate.price <= 0) {
+              throw new Error(`Invalid crypto price: ${candidate.price}`);
+            }
+            priceResult = candidate;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt < CRYPTO_RETRY_ATTEMPTS) {
+              console.warn(
+                `[calculatePortfolioTotal] Retry crypto ${asset.symbol} (${attempt}/${CRYPTO_RETRY_ATTEMPTS})`
+              );
+              await delay(CRYPTO_RETRY_DELAY_MS);
+            }
+          }
+        }
+
+        if (!priceResult) {
+          const stale = priceCache.getStale(`CRYPTO:${asset.symbol}`);
+          if (stale && Number.isFinite(stale.price) && stale.price > 0) {
+            console.warn(
+              `[calculatePortfolioTotal] Using stale crypto price for ${asset.symbol} after retries`
+            );
+            priceResult = stale;
+          } else {
+            throw new Error(
+              `Failed to fetch valid crypto price for ${asset.symbol} after ${CRYPTO_RETRY_ATTEMPTS} retries: ${
+                lastError instanceof Error ? lastError.message : 'Unknown error'
+              }`
+            );
+          }
+        }
+      } else {
+        const candidate = await fetcher.fetchPrice(asset.symbol);
+        if (!Number.isFinite(candidate.price) || candidate.price <= 0) {
+          throw new Error(`Invalid price for ${asset.symbol}: ${candidate.price}`);
+        }
+        priceResult = candidate;
+      }
       
       const valueInOriginalCurrency = priceResult.price * asset.quantity;
       const valueInBaseCurrency = await converter.convert(
@@ -716,6 +762,9 @@ export async function calculatePortfolioTotal(
     } catch (error) {
       console.error(`Error processing asset ${asset.symbol}:`, error);
       const reason = error instanceof Error ? error.message : 'Unknown error';
+      if (asset.market_type === 'CRYPTO') {
+        throw new Error(`Crypto price fetch failed for ${asset.symbol}: ${reason}`);
+      }
       failedAssets.push({ asset, reason });
       // Add asset with zero value for failed fetches
       assetDetails.push({

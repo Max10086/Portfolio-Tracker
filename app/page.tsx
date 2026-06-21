@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { HoldingsCard, type AssetWithPrice, type HoldingsData } from '@/components/holdings-card';
 import { NetWorthChart } from '@/components/net-worth-chart';
 import { AllocationPieChart } from '@/components/charts/allocation-pie-chart';
+import { PerformanceInsightsPanel } from '@/components/performance-insights-panel';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 export default function Home() {
   const [holdings, setHoldings] = useState<HoldingsData | null>(null);
@@ -67,10 +69,15 @@ export default function Home() {
   return (
     <main className="mx-auto w-full max-w-[1800px] py-8 px-6">
       <div className="mb-8">
-        <h1 className="text-4xl font-bold tracking-tight">Portfolio Tracker</h1>
-        <p className="text-muted-foreground mt-2">
-          Track your assets across multiple markets in real-time
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-bold tracking-tight">Portfolio Tracker</h1>
+            <p className="text-muted-foreground mt-2">
+              Track your assets across multiple markets in real-time
+            </p>
+          </div>
+          <ThemeToggle />
+        </div>
       </div>
       
       <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-2">
@@ -89,6 +96,10 @@ export default function Home() {
           <HoldingsCard onAssetsChanged={handleAssetsChanged} />
         </div>
       </div>
+
+      <section className="mt-8">
+        <PerformanceInsightsPanel />
+      </section>
     </main>
   );
 }

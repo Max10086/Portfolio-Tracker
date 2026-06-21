@@ -229,6 +229,7 @@ export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
               onTransactionUpdated={handleTransactionUpdated}
             />
           </TabsContent>
+
         </Tabs>
       </CardContent>
 
