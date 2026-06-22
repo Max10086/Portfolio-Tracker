@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
+function resolveBaseUrl(request: NextRequest): string {
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  const forwardedHost = request.headers.get('x-forwarded-host');
+  const host = forwardedHost || request.headers.get('host') || new URL(request.url).host;
+  const proto = forwardedProto || new URL(request.url).protocol.replace(':', '') || 'http';
+  return `${proto}://${host}`;
+}
+
 type Provider = 'deepseek' | 'gemini' | 'kimi';
 
 interface RequestBody {
@@ -221,7 +229,7 @@ export async function POST(request: NextRequest) {
           body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
         if (!hasInlineSummary) {
-          const summaryUrl = new URL('/api/analytics/llm-summary', request.url);
+          const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
             cache: 'no-store',
@@ -268,7 +276,7 @@ export async function POST(request: NextRequest) {
           body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
         if (!hasInlineSummary) {
-          const summaryUrl = new URL('/api/analytics/llm-summary', request.url);
+          const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
             cache: 'no-store',
@@ -315,7 +323,7 @@ export async function POST(request: NextRequest) {
           body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
         if (!hasInlineSummary) {
-          const summaryUrl = new URL('/api/analytics/llm-summary', request.url);
+          const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
             cache: 'no-store',

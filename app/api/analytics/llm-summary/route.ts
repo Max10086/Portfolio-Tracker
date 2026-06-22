@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
+function resolveBaseUrl(request: NextRequest): string {
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  const forwardedHost = request.headers.get('x-forwarded-host');
+  const host = forwardedHost || request.headers.get('host') || new URL(request.url).host;
+  const proto = forwardedProto || new URL(request.url).protocol.replace(':', '') || 'http';
+  return `${proto}://${host}`;
+}
+
 interface AnalyticsPayload {
   timeRange?: string;
   rangeStart?: string;
@@ -96,7 +104,7 @@ async function fetchAnalyticsPayload(
   request: NextRequest,
   timeRange: string
 ): Promise<{ ok: true; payload: AnalyticsPayload } | { ok: false; status: number; message: string }> {
-  const analyticsUrl = new URL('/api/analytics', request.url);
+  const analyticsUrl = new URL('/api/analytics', resolveBaseUrl(request));
   analyticsUrl.searchParams.set('timeRange', timeRange);
   const analyticsResponse = await fetch(analyticsUrl.toString(), {
     cache: 'no-store',
