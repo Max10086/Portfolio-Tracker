@@ -107,9 +107,18 @@ function smoothTransientNegativeSpikes(snapshots: PortfolioSnapshot[]): Portfoli
 
 function suppressShortLivedDrops(
   snapshots: PortfolioSnapshot[],
-  maxDropDurationMs: number
+  maxDropDurationMs: number,
+  options?: {
+    minDropAmount?: number;
+    minDropRatio?: number;
+    recoveryRatio?: number;
+  }
 ): PortfolioSnapshot[] {
   if (snapshots.length < 4) return snapshots;
+
+  const minDropAmount = options?.minDropAmount ?? 3000;
+  const minDropRatio = options?.minDropRatio ?? 0.05;
+  const recoveryRatio = options?.recoveryRatio ?? 0.95;
 
   const result = snapshots.map((snapshot) => ({
     ...snapshot,
@@ -124,7 +133,7 @@ function suppressShortLivedDrops(
     const currValue = Number(result[i].total_value);
     const dropAmount = leftValue - currValue;
     const dropRatio = dropAmount / leftValue;
-    if (dropAmount < 3000 && dropRatio < 0.05) continue;
+    if (dropAmount < minDropAmount && dropRatio < minDropRatio) continue;
 
     const leftTime = new Date(left.recorded_at).getTime();
     let recoverAt = -1;
@@ -132,7 +141,7 @@ function suppressShortLivedDrops(
     for (let j = i + 1; j < result.length; j++) {
       const elapsed = new Date(result[j].recorded_at).getTime() - leftTime;
       if (elapsed > maxDropDurationMs) break;
-      if (Number(result[j].total_value) >= leftValue * 0.95) {
+      if (Number(result[j].total_value) >= leftValue * recoveryRatio) {
         recoverAt = j;
         break;
       }
@@ -159,7 +168,7 @@ function suppressShortLivedDrops(
   return result;
 }
 
-function smoothIsolatedNegativeSpikes(data: ChartData[]): ChartData[] {
+function smoothIsolatedNegativeSpikes(data: ChartData[], aggressive = false): ChartData[] {
   if (data.length < 3) return data;
 
   const smoothed = [...data];
@@ -171,10 +180,16 @@ function smoothIsolatedNegativeSpikes(data: ChartData[]): ChartData[] {
     if (prev.value <= 0 || next.value <= 0) continue;
 
     const baseline = Math.min(prev.value, next.value);
-    const hasSharpDrop = curr.value < baseline * 0.7;
-    const quickRecovery = Math.abs(next.value - prev.value) / prev.value < 0.2;
+    const baselineRatio = aggressive ? 0.9 : 0.7;
+    const recoveryTolerance = aggressive ? 0.08 : 0.2;
+    const minDropAbs = aggressive ? 1200 : 2500;
+    const hasSharpDrop = curr.value < baseline * baselineRatio;
+    const dropAbs = baseline - curr.value;
+    const quickRecovery = Math.abs(next.value - prev.value) / prev.value < recoveryTolerance;
+    const spanMs = next.timestamp.getTime() - prev.timestamp.getTime();
+    const shortSpan = spanMs <= 10 * 60 * 60 * 1000;
 
-    if (hasSharpDrop && quickRecovery) {
+    if (hasSharpDrop && quickRecovery && dropAbs >= minDropAbs && shortSpan) {
       smoothed[i] = {
         ...curr,
         value: (prev.value + next.value) / 2,
@@ -295,8 +310,8 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         }
       }
 
-      // 7D 视图降采样为每 6 小时一个点，减少高频噪音
-      if (activeRange.days <= 7) {
+      // 7D / 1M 视图统一降采样为每 6 小时一个点，避免1小时粒度噪音与尖刺
+      if (activeRange.days <= 30) {
         processedSnapshots = downsampleByInterval(processedSnapshots, SIX_HOURS_MS);
       }
 
@@ -321,7 +336,18 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
       );
       processedSnapshots = smoothTransientNegativeSpikes(processedSnapshots);
       if (activeRange.days <= 30) {
-        processedSnapshots = suppressShortLivedDrops(processedSnapshots, 6 * 60 * 60 * 1000);
+        const oneMonthView = activeRange.days === 30;
+        processedSnapshots = suppressShortLivedDrops(
+          processedSnapshots,
+          oneMonthView ? 12 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000,
+          oneMonthView
+            ? {
+                minDropAmount: 1200,
+                minDropRatio: 0.025,
+                recoveryRatio: 0.97,
+              }
+            : undefined
+        );
       }
 
       // Transform data for chart
@@ -373,7 +399,7 @@ export function NetWorthChart({ defaultDays = 30, limit, refreshTrigger }: NetWo
         };
       });
 
-      setChartData(smoothIsolatedNegativeSpikes(transformed));
+      setChartData(smoothIsolatedNegativeSpikes(transformed, activeRange.days === 30));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
