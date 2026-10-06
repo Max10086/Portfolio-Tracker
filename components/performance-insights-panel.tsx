@@ -11,7 +11,22 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { ChevronDown, ChevronRight, Pencil, RefreshCw, Trash2 } from 'lucide-react';
+import { updateHoldingTag } from '@/app/actions/assets';
+import {
+  EditTransactionDialog,
+  type EditableTransaction,
+} from '@/components/edit-transaction-dialog';
 import {
   Select,
   SelectContent,
@@ -19,6 +34,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { PnlAttributionView } from '@/components/position-optimization/pnl-attribution-view';
+import { MonthlyTimelineView } from '@/components/position-optimization/monthly-timeline-view';
+import { PositionTreemapView } from '@/components/position-optimization/position-treemap-view';
+import { StrategyQualityView } from '@/components/position-optimization/strategy-quality-view';
+import type { ClosedTradeRow } from '@/components/position-optimization/types';
 
 interface ReviewPanel {
   currentValue: number;
@@ -96,7 +117,10 @@ interface AnalyticsResponse {
     maxLossStreak: number;
     trades30d: number;
   };
+  closedTradesInRange?: ClosedTradeRow[];
 }
+
+type PositionOptTab = 'table' | 'attribution' | 'timeline' | 'treemap' | 'strategy';
 
 type AiTimeRange = '7d' | '30d' | '90d' | '365d';
 
@@ -125,6 +149,10 @@ function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString('en-US');
+}
+
+function assetHistoryKey(symbol: string, marketType: string): string {
+  return `${symbol}:${marketType}`;
 }
 
 export function PerformanceInsightsPanel() {
@@ -171,7 +199,7 @@ export function PerformanceInsightsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [expandedTags, setExpandedTags] = useState<Record<string, boolean>>({});
   const [aiProvider, setAiProvider] = useState<'deepseek' | 'gemini' | 'kimi'>('deepseek');
-  const [aiModel, setAiModel] = useState('deepseek-v4-flash');
+  const [aiModel, setAiModel] = useState('deepseek-flash');
   const [aiTimeRange, setAiTimeRange] = useState<AiTimeRange>('30d');
   const [aiPrompt, setAiPrompt] = useState(defaultAiPrompt);
   const [aiLoading, setAiLoading] = useState(false);
@@ -183,6 +211,23 @@ export function PerformanceInsightsPanel() {
   const [llmSummaryAt, setLlmSummaryAt] = useState<string>('');
   const [savedReviews, setSavedReviews] = useState<SavedAiReview[]>([]);
   const [expandedSavedReviews, setExpandedSavedReviews] = useState<Record<string, boolean>>({});
+  const [aiSuccess, setAiSuccess] = useState<string | null>(null);
+  const [aiSectionOpen, setAiSectionOpen] = useState(false);
+  const [allTransactions, setAllTransactions] = useState<EditableTransaction[]>([]);
+  const [txLoading, setTxLoading] = useState(false);
+  const [txHistoryReady, setTxHistoryReady] = useState(false);
+  const [assetNameByKey, setAssetNameByKey] = useState<Record<string, string>>({});
+  const [namesLoading, setNamesLoading] = useState(false);
+  const [expandedAssetHistory, setExpandedAssetHistory] = useState<Record<string, boolean>>({});
+  const [editingTransaction, setEditingTransaction] = useState<EditableTransaction | null>(null);
+  const [tagEditAsset, setTagEditAsset] = useState<AssetRow | null>(null);
+  const [tagEditValue, setTagEditValue] = useState('');
+  const [tagSaving, setTagSaving] = useState(false);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [positionOptTab, setPositionOptTab] = useState<PositionOptTab>('table');
+
+  const isUsableLlmSummary = (summary: Record<string, unknown> | null) =>
+    Boolean(summary?.historical_context && summary?.focus_context);
 
   const persistSavedReviews = (next: SavedAiReview[]) => {
     setSavedReviews(next);
@@ -193,19 +238,20 @@ export function PerformanceInsightsPanel() {
     }
   };
 
-  const precomputeLlmSummary = async (timeRange: AiTimeRange) => {
+  const precomputeLlmSummary = async (timeRange: AiTimeRange): Promise<Record<string, unknown> | null> => {
     try {
       const response = await fetch(`/api/analytics/llm-summary?timeRange=${timeRange}`, {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache' },
       });
-      if (!response.ok) return;
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok) return null;
       setLlmSummary(payload);
       const generatedAt = typeof payload.generatedAt === 'string' ? payload.generatedAt : '';
       setLlmSummaryAt(generatedAt);
+      return payload;
     } catch {
-      // Keep AI button functional even if precompute fails.
+      return null;
     }
   };
 
@@ -219,11 +265,14 @@ export function PerformanceInsightsPanel() {
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.error || 'Failed to fetch analytics');
+        const detail =
+          typeof payload.details === 'string' && payload.details.trim()
+            ? payload.details.trim()
+            : '';
+        throw new Error(detail || payload.error || 'Failed to fetch analytics');
       }
       const payload = (await response.json()) as AnalyticsResponse;
       setData(payload);
-      void precomputeLlmSummary(aiTimeRange);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -253,8 +302,48 @@ export function PerformanceInsightsPanel() {
   }, []);
 
   useEffect(() => {
+    if (!aiSectionOpen) return;
     void precomputeLlmSummary(aiTimeRange);
-  }, [aiTimeRange]);
+  }, [aiSectionOpen, aiTimeRange]);
+
+  useEffect(() => {
+    if (loading || !data) return;
+
+    const loadAssetNames = async (assets: AssetRow[]) => {
+      const unique = new Map<string, { symbol: string; market_type: string }>();
+      for (const asset of assets) {
+        const key = assetHistoryKey(asset.symbol, asset.marketType);
+        if (!unique.has(key)) {
+          unique.set(key, { symbol: asset.symbol, market_type: asset.marketType });
+        }
+      }
+      if (unique.size === 0) return;
+
+      setNamesLoading(true);
+      try {
+        const response = await fetch('/api/asset-names', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assets: [...unique.values()] }),
+        });
+        if (!response.ok) return;
+        const payload = (await response.json()) as { names?: Record<string, string> };
+        if (payload.names) {
+          setAssetNameByKey((prev) => ({ ...prev, ...payload.names }));
+        }
+      } catch {
+        // Keep symbol fallback in UI.
+      } finally {
+        setNamesLoading(false);
+      }
+    };
+
+    void (async () => {
+      setTxHistoryReady(false);
+      await Promise.all([loadTransactions(), loadAssetNames(data.breakdowns.byAsset)]);
+      setTxHistoryReady(true);
+    })();
+  }, [loading, data?.generatedAt]);
 
   const allAssets = useMemo(() => data?.breakdowns.byAsset || [], [data]);
   const groupedByTag = useMemo(() => {
@@ -318,8 +407,88 @@ export function PerformanceInsightsPanel() {
     setExpandedTags((prev) => ({ ...prev, [tag]: !prev[tag] }));
   };
 
+  const loadTransactions = async () => {
+    setTxLoading(true);
+    try {
+      const response = await fetch('/api/transactions?view=transactions', {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      if (!response.ok) {
+        throw new Error('Failed to load transactions');
+      }
+      const payload = (await response.json()) as { transactions?: EditableTransaction[] };
+      setAllTransactions(payload.transactions || []);
+    } catch {
+      setAllTransactions([]);
+    } finally {
+      setTxLoading(false);
+    }
+  };
+
+  const refreshAfterTxChange = async () => {
+    await fetchAnalytics();
+  };
+
+  const displayNameForAsset = (symbol: string, marketType: string, fallback?: string) => {
+    const key = assetHistoryKey(symbol, marketType);
+    return assetNameByKey[key] || fallback || symbol;
+  };
+
+  const drillToTagInTable = (tag: string) => {
+    setPositionOptTab('table');
+    setExpandedTags((prev) => ({ ...prev, [tag]: true }));
+  };
+
+  const drillToAssetInTable = (symbol: string, marketType: string) => {
+    const asset = allAssets.find(
+      (a) => a.symbol.toUpperCase() === symbol.toUpperCase() && a.marketType === marketType
+    );
+    const tag = asset?.tag || 'Uncategorized';
+    setPositionOptTab('table');
+    setExpandedTags((prev) => ({ ...prev, [tag]: true }));
+    setExpandedAssetHistory((prev) => ({
+      ...prev,
+      [assetHistoryKey(symbol, marketType)]: true,
+    }));
+  };
+
+  const toggleAssetHistory = (symbol: string, marketType: string) => {
+    const key = assetHistoryKey(symbol, marketType);
+    setExpandedAssetHistory((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const transactionsForAsset = (symbol: string, marketType: string) =>
+    allTransactions
+      .filter(
+        (tx) =>
+          tx.symbol.toUpperCase() === symbol.toUpperCase() &&
+          tx.market_type === marketType
+      )
+      .sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
+
+  const openTagEditor = (asset: AssetRow) => {
+    setTagEditAsset(asset);
+    setTagEditValue(asset.tag === 'Uncategorized' ? '' : asset.tag);
+    setTagError(null);
+  };
+
+  const saveAssetTag = async () => {
+    if (!tagEditAsset) return;
+    setTagSaving(true);
+    setTagError(null);
+    const result = await updateHoldingTag(tagEditAsset.symbol, tagEditAsset.marketType, tagEditValue);
+    setTagSaving(false);
+    if (result.success) {
+      setTagEditAsset(null);
+      await refreshAfterTxChange();
+    } else {
+      setTagError(result.error || 'Failed to update tag');
+    }
+  };
+
   const defaultModelByProvider: Record<'deepseek' | 'gemini' | 'kimi', string> = {
-    deepseek: 'deepseek-v4-flash',
+    deepseek: 'deepseek-flash',
     gemini: 'gemini-3.5-flash',
     kimi: 'kimi-k2.6',
   };
@@ -329,40 +498,7 @@ export function PerformanceInsightsPanel() {
     setAiModel(defaultModelByProvider[value]);
   };
 
-  const generateAiReview = async () => {
-    try {
-      setAiLoading(true);
-      setAiError(null);
-      const response = await fetch('/api/analytics/ai-review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: aiProvider,
-          model: aiModel.trim() || defaultModelByProvider[aiProvider],
-          promptTemplate: aiPrompt,
-          timeRange: aiTimeRange,
-          summary: llmSummary || undefined,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.details || payload?.error || 'Failed to generate AI review');
-      }
-      setAiOutput(payload.analysis || '');
-      setAiOutputGeneratedAt(payload.generatedAt || new Date().toISOString());
-      setAiOutputDirty(true);
-    } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Unknown error');
-      setAiOutput('');
-      setAiOutputGeneratedAt('');
-      setAiOutputDirty(false);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const keepCurrentReview = async () => {
-    if (!aiOutput.trim()) return;
+  const saveReviewToLibrary = async (output: string, generatedAt: string) => {
     let generatedTitle = '复盘记录';
     try {
       const titleResp = await fetch('/api/analytics/ai-review', {
@@ -372,7 +508,7 @@ export function PerformanceInsightsPanel() {
           mode: 'title',
           provider: aiProvider,
           model: aiModel.trim() || defaultModelByProvider[aiProvider],
-          reviewOutput: aiOutput,
+          reviewOutput: output,
         }),
       });
       const titlePayload = await titleResp.json().catch(() => ({}));
@@ -384,20 +520,81 @@ export function PerformanceInsightsPanel() {
     }
     const review: SavedAiReview = {
       id: `${Date.now()}`,
-      savedAt: aiOutputGeneratedAt || new Date().toISOString(),
+      savedAt: generatedAt,
       title: generatedTitle,
       provider: aiProvider,
       model: aiModel.trim() || defaultModelByProvider[aiProvider],
       timeRange: aiTimeRange,
       prompt: aiPrompt,
-      output: aiOutput,
+      output,
     };
     const next = [review, ...savedReviews].slice(0, 50);
     persistSavedReviews(next);
-    setExpandedSavedReviews((prev) => ({ ...prev, [review.id]: false }));
+    setExpandedSavedReviews((prev) => ({ ...prev, [review.id]: true }));
+    return review;
+  };
+
+  const generateAiReview = async () => {
+    try {
+      setAiLoading(true);
+      setAiError(null);
+      setAiSuccess(null);
+
+      let summaryForRequest = isUsableLlmSummary(llmSummary) ? llmSummary : null;
+      if (!summaryForRequest) {
+        summaryForRequest = await precomputeLlmSummary(aiTimeRange);
+      }
+      if (!isUsableLlmSummary(summaryForRequest)) {
+        throw new Error(
+          'Analytics summary is not ready yet. Wait for the insights section to finish loading, then try again.'
+        );
+      }
+
+      const response = await fetch('/api/analytics/ai-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: aiProvider,
+          model: aiModel.trim() || defaultModelByProvider[aiProvider],
+          promptTemplate: aiPrompt,
+          timeRange: aiTimeRange,
+          summary: summaryForRequest,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.details || payload?.error || 'Failed to generate AI review');
+      }
+      const analysis = typeof payload.analysis === 'string' ? payload.analysis.trim() : '';
+      if (!analysis) {
+        throw new Error('AI returned empty content. Try another provider or model.');
+      }
+      const generatedAt =
+        typeof payload.generatedAt === 'string' ? payload.generatedAt : new Date().toISOString();
+      setAiOutput(analysis);
+      setAiOutputGeneratedAt(generatedAt);
+      setAiOutputDirty(true);
+
+      const saved = await saveReviewToLibrary(analysis, generatedAt);
+      setAiSuccess(`Review saved as "${saved.title}". Expand it under Saved Reviews below.`);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Unknown error');
+      setAiOutput('');
+      setAiOutputGeneratedAt('');
+      setAiOutputDirty(false);
+      setAiSuccess(null);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const keepCurrentReview = async () => {
+    if (!aiOutput.trim()) return;
+    await saveReviewToLibrary(aiOutput, aiOutputGeneratedAt || new Date().toISOString());
     setAiOutput('');
     setAiOutputGeneratedAt('');
     setAiOutputDirty(false);
+    setAiSuccess('Review saved to Saved Reviews.');
   };
 
   const dropCurrentReview = () => {
@@ -420,6 +617,16 @@ export function PerformanceInsightsPanel() {
     setAiOutput(item.output);
     setAiOutputGeneratedAt(item.savedAt);
     setAiOutputDirty(false);
+  };
+
+  const deleteSavedReview = (id: string) => {
+    const next = savedReviews.filter((review) => review.id !== id);
+    persistSavedReviews(next);
+    setExpandedSavedReviews((prev) => {
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
   };
 
   if (loading) {
@@ -500,8 +707,74 @@ export function PerformanceInsightsPanel() {
       <Card>
         <CardHeader>
           <CardTitle>Position Optimization</CardTitle>
+          <p className="mt-1 text-sm font-normal text-muted-foreground">
+            Expand each asset to audit buys/sells and fix bad history.
+            {txLoading && !txHistoryReady ? ' · Loading transaction history…' : ''}
+            {namesLoading ? ' · Resolving asset names…' : ''}
+          </p>
         </CardHeader>
         <CardContent>
+          <Tabs
+            value={positionOptTab}
+            onValueChange={(value) => setPositionOptTab(value as PositionOptTab)}
+            className="w-full"
+          >
+            <TabsList className="mb-4 flex h-auto w-full flex-wrap justify-start gap-1 p-1">
+              <TabsTrigger value="table" className="text-xs sm:text-sm">
+                Table
+              </TabsTrigger>
+              <TabsTrigger value="attribution" className="text-xs sm:text-sm">
+                Attribution
+              </TabsTrigger>
+              <TabsTrigger value="timeline" className="text-xs sm:text-sm">
+                Timeline
+              </TabsTrigger>
+              <TabsTrigger value="treemap" className="text-xs sm:text-sm">
+                Map
+              </TabsTrigger>
+              <TabsTrigger value="strategy" className="text-xs sm:text-sm">
+                Strategy
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="attribution" className="mt-0">
+              <PnlAttributionView
+                byTag={data.breakdowns.byTag}
+                byMarket={data.breakdowns.byMarket}
+                byAsset={allAssets}
+                baseCurrency={baseCurrency}
+                onDrillTag={drillToTagInTable}
+                onDrillAsset={drillToAssetInTable}
+              />
+            </TabsContent>
+
+            <TabsContent value="timeline" className="mt-0">
+              <MonthlyTimelineView
+                monthlyPerformance={data.breakdowns.monthlyPerformance}
+                closedTrades={data.closedTradesInRange ?? []}
+                baseCurrency={baseCurrency}
+              />
+            </TabsContent>
+
+            <TabsContent value="treemap" className="mt-0">
+              <PositionTreemapView
+                assets={allAssets}
+                baseCurrency={baseCurrency}
+                onSelectAsset={drillToAssetInTable}
+              />
+            </TabsContent>
+
+            <TabsContent value="strategy" className="mt-0">
+              <StrategyQualityView
+                byTag={data.breakdowns.byTag}
+                byAsset={allAssets}
+                behaviorStats={data.behaviorStats}
+                baseCurrency={baseCurrency}
+                onDrillTag={drillToTagInTable}
+              />
+            </TabsContent>
+
+            <TabsContent value="table" className="mt-0">
           <Table className="text-base">
             <TableHeader>
               <TableRow>
@@ -544,38 +817,183 @@ export function PerformanceInsightsPanel() {
                       <TableCell className="text-right">{group.avgHoldingDays.toFixed(1)} d</TableCell>
                     </TableRow>
                     {isOpen &&
-                      group.assets.map((asset) => (
-                        <TableRow key={`${group.tag}-${asset.symbol}-${asset.marketType}`} className="bg-muted/30">
-                          <TableCell>
-                            <div className="pl-6 font-medium">{asset.symbol}</div>
-                            <div className="pl-6 text-base text-muted-foreground">{asset.name} · {asset.marketType}</div>
-                          </TableCell>
-                          <TableCell className="text-right">{asset.allocationPct.toFixed(2)}%</TableCell>
-                          <TableCell className="text-right">{formatCurrency(asset.currentValue, baseCurrency)}</TableCell>
-                          <TableCell className={`text-right ${asset.realizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {formatCurrency(asset.realizedPnL, baseCurrency)}
-                          </TableCell>
-                          <TableCell className={`text-right ${asset.unrealizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {formatCurrency(asset.unrealizedPnL, baseCurrency)}
-                          </TableCell>
-                          <TableCell className={`text-right ${asset.returnPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {asset.returnPct.toFixed(2)}%
-                          </TableCell>
-                          <TableCell className="text-right">{asset.avgHoldingDays.toFixed(1)} d</TableCell>
-                        </TableRow>
-                      ))}
+                      group.assets.map((asset) => {
+                        const historyKey = assetHistoryKey(asset.symbol, asset.marketType);
+                        const historyOpen = !!expandedAssetHistory[historyKey];
+                        const assetTxs = transactionsForAsset(asset.symbol, asset.marketType);
+                        const resolvedName = displayNameForAsset(asset.symbol, asset.marketType, asset.name);
+                        const showResolvedName =
+                          resolvedName.trim().toUpperCase() !== asset.symbol.trim().toUpperCase();
+                        return (
+                          <Fragment key={`${group.tag}-${asset.symbol}-${asset.marketType}`}>
+                            <TableRow className="bg-muted/30">
+                              <TableCell>
+                                <div className="flex items-start gap-2 pl-4">
+                                  {txHistoryReady ? (
+                                    <button
+                                      type="button"
+                                      className="mt-0.5 inline-flex shrink-0"
+                                      aria-label={
+                                        historyOpen
+                                          ? `Collapse ${asset.symbol} transactions`
+                                          : `Expand ${asset.symbol} transactions`
+                                      }
+                                      onClick={() => toggleAssetHistory(asset.symbol, asset.marketType)}
+                                    >
+                                      {historyOpen ? (
+                                        <ChevronDown className="h-4 w-4" />
+                                      ) : (
+                                        <ChevronRight className="h-4 w-4" />
+                                      )}
+                                    </button>
+                                  ) : (
+                                    <span className="w-4 shrink-0" />
+                                  )}
+                                  <div>
+                                    <div className="flex items-center gap-2 font-medium">
+                                      <span>{asset.symbol}</span>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7"
+                                        aria-label={`Edit tag for ${asset.symbol}`}
+                                        onClick={() => openTagEditor(asset)}
+                                      >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                      </Button>
+                                    </div>
+                                    <div className="text-base text-muted-foreground">
+                                      {showResolvedName
+                                        ? `${resolvedName} · ${asset.marketType}`
+                                        : namesLoading
+                                          ? `… · ${asset.marketType}`
+                                          : asset.marketType}
+                                      {txHistoryReady ? ` · ${assetTxs.length} tx` : ''}
+                                    </div>
+                                  </div>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right">{asset.allocationPct.toFixed(2)}%</TableCell>
+                              <TableCell className="text-right">
+                                {formatCurrency(asset.currentValue, baseCurrency)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right ${asset.realizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                              >
+                                {formatCurrency(asset.realizedPnL, baseCurrency)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right ${asset.unrealizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                              >
+                                {formatCurrency(asset.unrealizedPnL, baseCurrency)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right ${asset.returnPct >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                              >
+                                {asset.returnPct.toFixed(2)}%
+                              </TableCell>
+                              <TableCell className="text-right">{asset.avgHoldingDays.toFixed(1)} d</TableCell>
+                            </TableRow>
+                            {txHistoryReady && historyOpen && (
+                              <TableRow className="bg-muted/20">
+                                <TableCell colSpan={7} className="p-0">
+                                  <div className="border-t px-6 py-3">
+                                    {assetTxs.length === 0 ? (
+                                      <p className="text-sm text-muted-foreground">No transactions found.</p>
+                                    ) : (
+                                      <Table className="text-sm">
+                                        <TableHeader>
+                                          <TableRow>
+                                            <TableHead>Date</TableHead>
+                                            <TableHead>Type</TableHead>
+                                            <TableHead className="text-right">Qty</TableHead>
+                                            <TableHead className="text-right">Price</TableHead>
+                                            <TableHead>Tag</TableHead>
+                                            <TableHead>Notes</TableHead>
+                                            <TableHead className="w-[72px]" />
+                                          </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                          {assetTxs.map((tx) => (
+                                            <TableRow key={tx.id}>
+                                              <TableCell>{formatDate(tx.transaction_date)}</TableCell>
+                                              <TableCell>{tx.transaction_type}</TableCell>
+                                              <TableCell className="text-right">
+                                                {tx.quantity.toLocaleString('en-US', {
+                                                  maximumFractionDigits: 8,
+                                                })}
+                                              </TableCell>
+                                              <TableCell className="text-right">
+                                                {tx.price_per_unit != null
+                                                  ? tx.price_per_unit.toLocaleString('en-US', {
+                                                      maximumFractionDigits: 8,
+                                                    })
+                                                  : '—'}
+                                              </TableCell>
+                                              <TableCell>{tx.tag?.trim() || 'Uncategorized'}</TableCell>
+                                              <TableCell className="max-w-[200px] truncate">
+                                                {tx.notes?.trim() || '—'}
+                                              </TableCell>
+                                              <TableCell>
+                                                <Button
+                                                  type="button"
+                                                  variant="ghost"
+                                                  size="icon"
+                                                  className="h-8 w-8"
+                                                  aria-label="Edit transaction"
+                                                  onClick={() => setEditingTransaction(tx)}
+                                                >
+                                                  <Pencil className="h-4 w-4" />
+                                                </Button>
+                                              </TableCell>
+                                            </TableRow>
+                                          ))}
+                                        </TableBody>
+                                      </Table>
+                                    )}
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                   </Fragment>
                 );
               })}
             </TableBody>
           </Table>
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle>AI Strategy Review</CardTitle>
+        <CardHeader className="pb-3">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 text-left"
+            onClick={() => setAiSectionOpen((open) => !open)}
+            aria-expanded={aiSectionOpen}
+          >
+            <div>
+              <CardTitle className="text-lg">AI Strategy Review</CardTitle>
+              <p className="mt-1 text-sm font-normal text-muted-foreground">
+                {aiSectionOpen
+                  ? 'Generate reviews and manage saved history'
+                  : 'Collapsed — expand when you need an AI review'}
+                {savedReviews.length > 0 ? ` · ${savedReviews.length} saved` : ''}
+              </p>
+            </div>
+            {aiSectionOpen ? (
+              <ChevronDown className="h-5 w-5 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
+            )}
+          </button>
         </CardHeader>
+        {aiSectionOpen && (
         <CardContent className="space-y-3">
           <div className="grid gap-3 md:grid-cols-3">
             <div className="space-y-1">
@@ -645,19 +1063,35 @@ export function PerformanceInsightsPanel() {
                 const isOpen = !!expandedSavedReviews[review.id];
                 return (
                   <div key={review.id} className="rounded-md border">
-                    <button
-                      type="button"
-                      className="flex w-full items-center justify-between px-3 py-2 text-left"
-                      onClick={() => toggleSavedReview(review.id)}
-                    >
-                      <div>
-                        <p className="text-sm font-medium">{review.title}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {formatDate(review.savedAt)} · {review.provider} · {review.model}
-                        </p>
-                      </div>
-                      {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </button>
+                    <div className="flex items-center gap-1 pr-2">
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center justify-between px-3 py-2 text-left"
+                        onClick={() => toggleSavedReview(review.id)}
+                      >
+                        <div className="min-w-0 pr-2">
+                          <p className="text-sm font-medium">{review.title}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatDate(review.savedAt)} · {review.provider} · {review.model}
+                          </p>
+                        </div>
+                        {isOpen ? (
+                          <ChevronDown className="h-4 w-4 shrink-0" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4 shrink-0" />
+                        )}
+                      </button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={`Delete review ${review.title}`}
+                        onClick={() => deleteSavedReview(review.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                     {isOpen && (
                       <div className="border-t px-3 py-3">
                         <p className="mb-2 text-xs text-muted-foreground">
@@ -666,9 +1100,19 @@ export function PerformanceInsightsPanel() {
                         <div className="mb-3 rounded-md bg-muted/30 p-2">
                           <pre className="whitespace-pre-wrap text-sm leading-6">{review.output}</pre>
                         </div>
-                        <Button size="sm" variant="outline" onClick={() => loadSavedReviewToEditor(review.id)}>
-                          Load Into Editor
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" variant="outline" onClick={() => loadSavedReviewToEditor(review.id)}>
+                            Load Into Editor
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => deleteSavedReview(review.id)}
+                          >
+                            Delete
+                          </Button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -682,6 +1126,11 @@ export function PerformanceInsightsPanel() {
           {aiError && (
             <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{aiError}</div>
           )}
+          {aiSuccess && (
+            <div className="rounded-md bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+              {aiSuccess}
+            </div>
+          )}
           {aiOutput && (
             <div className="rounded-md border p-4">
               <p className="mb-2 text-sm font-medium text-muted-foreground">Model Output</p>
@@ -694,7 +1143,54 @@ export function PerformanceInsightsPanel() {
             </div>
           )}
         </CardContent>
+        )}
       </Card>
+
+      <EditTransactionDialog
+        transaction={editingTransaction}
+        open={!!editingTransaction}
+        onOpenChange={(open) => {
+          if (!open) setEditingTransaction(null);
+        }}
+        onSaved={() => void refreshAfterTxChange()}
+      />
+
+      <Dialog
+        open={!!tagEditAsset}
+        onOpenChange={(open) => {
+          if (!open && !tagSaving) setTagEditAsset(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>Edit tag for {tagEditAsset?.symbol}</DialogTitle>
+            <DialogDescription>
+              Applies to every transaction with this symbol and market (same ticker).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="position-opt-tag">Tag / category</Label>
+              <Input
+                id="position-opt-tag"
+                placeholder="e.g., Crypto core"
+                value={tagEditValue}
+                onChange={(e) => setTagEditValue(e.target.value)}
+                disabled={tagSaving}
+              />
+            </div>
+            {tagError && <p className="text-sm text-red-600">{tagError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTagEditAsset(null)} disabled={tagSaving}>
+              Cancel
+            </Button>
+            <Button onClick={() => void saveAssetTag()} disabled={tagSaving}>
+              {tagSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

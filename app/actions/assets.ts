@@ -1,6 +1,7 @@
 'use server';
 
 import { createServerClient } from '@/lib/supabase';
+import { syncTagForAssetTransactions } from '@/lib/sync-asset-tag';
 
 /**
  * Updates the tag for ALL transactions matching the given symbol and market type.
@@ -23,11 +24,7 @@ export async function updateHoldingTag(
 
     const tagValue = newTag.trim() || null;
 
-    const { error } = await supabase
-      .from('transactions')
-      .update({ tag: tagValue })
-      .eq('symbol', normalizedSymbol)
-      .eq('market_type', marketType);
+    const { error } = await syncTagForAssetTransactions(supabase, normalizedSymbol, marketType, tagValue);
 
     if (error) {
       console.error('Error updating holding tag:', error);

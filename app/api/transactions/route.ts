@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, CurrencyConverter, type Asset } from '@/lib/price-service';
+import { syncTagForAssetTransactions } from '@/lib/sync-asset-tag';
 
 
 
@@ -180,20 +181,40 @@ async function enrichHoldingsWithPrices(
         value: detail?.value || 0,
         currency: detail?.currency || baseCurrency,
         baseCurrency: baseCurrency,
-        name: detail?.name,
+        name: detail?.name || holding.symbol,
       };
     });
+
+    const pricingWarnings = calculationResult.failedAssets.map(
+      (f) => `${f.asset.symbol}: ${f.reason}`
+    );
 
     return NextResponse.json({
       assets: enrichedAssets,
       assetDetails: calculationResult.assetDetails,
       totalValue: calculationResult.totalValue,
       baseCurrency: calculationResult.baseCurrency,
+      ...(pricingWarnings.length > 0 ? { pricingWarnings } : {}),
     });
   } catch (error) {
     console.error('Error calculating prices:', error);
+    const fallbackAssets = holdingsWithTag.map((holding, index) => ({
+      id: `${holding.symbol}-${index}`,
+      symbol: holding.symbol,
+      market_type: holding.market_type,
+      quantity: Number(holding.quantity),
+      first_transaction_date: holding.first_transaction_date,
+      last_transaction_date: holding.last_transaction_date,
+      transaction_count: holding.transaction_count,
+      tag: holding.tag,
+      price: 0,
+      value: 0,
+      currency: baseCurrency,
+      baseCurrency,
+      name: holding.symbol,
+    }));
     return NextResponse.json({
-      assets: holdings,
+      assets: fallbackAssets,
       assetDetails: [],
       error: 'Failed to fetch prices',
       details: (error as Error).message,
@@ -402,10 +423,12 @@ export async function POST(request: NextRequest) {
       }
 
       if (tag && String(tag).trim()) {
-        await supabase
-          .from('transactions')
-          .update({ tag: String(tag).trim() })
-          .eq('id', txId);
+        await syncTagForAssetTransactions(
+          supabase,
+          symbol.trim().toUpperCase(),
+          market_type,
+          String(tag).trim()
+        );
       }
 
       const { data: transaction, error: fetchError } = await supabase
@@ -454,6 +477,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Failed to add transaction', details: error.message },
         { status: 500 }
+      );
+    }
+
+    if (tag && String(tag).trim()) {
+      await syncTagForAssetTransactions(
+        supabase,
+        symbol.trim().toUpperCase(),
+        market_type,
+        String(tag).trim()
       );
     }
 

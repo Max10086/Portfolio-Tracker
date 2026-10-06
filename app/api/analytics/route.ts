@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { calculatePortfolioTotal, CurrencyConverter, type Asset, type MarketType } from '@/lib/price-service';
+import { buildTagByAssetFromTransactions } from '@/lib/sync-asset-tag';
 
 export const dynamic = 'force-dynamic';
 
@@ -75,8 +76,6 @@ type TimeRange = '7d' | '30d' | '90d' | '365d' | 'all';
 const PAGE_SIZE = 1000;
 const MAX_SNAPSHOT_ROWS = 20000;
 const ANALYTICS_CACHE_TTL_MS = 10 * 60 * 1000;
-const HOLDINGS_VALUATION_RETRY_ATTEMPTS = 6;
-const HOLDINGS_VALUATION_RETRY_DELAY_MS = 1200;
 
 interface AnalyticsCacheEntry {
   payload: unknown;
@@ -120,17 +119,22 @@ function pushInsight(target: string[], value: string): void {
   if (!target.includes(value)) target.push(value);
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** When FIFO open qty exceeds DB holdings (e.g. skipped sells), drop oldest lots first. */
+function trimLotsToTargetQty(lots: Lot[], targetQty: number): Lot[] {
+  if (targetQty <= 0 || lots.length === 0) return [];
+  const trimmed = lots.map((lot) => ({ ...lot }));
+  let totalQty = trimmed.reduce((sum, lot) => sum + lot.qty, 0);
+  if (totalQty <= targetQty + 1e-8) return trimmed;
 
-function hasInvalidHeldCryptoValues(
-  valuation: Awaited<ReturnType<typeof calculatePortfolioTotal>>
-): boolean {
-  return valuation.assetDetails.some(
-    (detail) =>
-      detail.asset.market_type === 'CRYPTO' &&
-      detail.asset.quantity > 0 &&
-      (!Number.isFinite(detail.price) || detail.price <= 0 || !Number.isFinite(detail.value) || detail.value <= 0)
-  );
+  let excess = totalQty - targetQty;
+  while (excess > 1e-8 && trimmed.length > 0) {
+    const lot = trimmed[0];
+    const remove = Math.min(excess, lot.qty);
+    lot.qty -= remove;
+    excess -= remove;
+    if (lot.qty <= 1e-8) trimmed.shift();
+  }
+  return trimmed;
 }
 
 export async function GET(request: NextRequest) {
@@ -144,12 +148,17 @@ export async function GET(request: NextRequest) {
     const baseCurrency = (process.env.BASE_CURRENCY || 'USD').toUpperCase();
     const converter = new CurrencyConverter();
 
-    // Fast fingerprint query: if no new transaction arrives, reuse last analytics payload.
-    const [latestTxRes, txCountRes] = await Promise.all([
+    // Fingerprint: bust cache when rows are inserted, deleted, or edited (updated_at).
+    const [latestTxRes, latestUpdateRes, txCountRes] = await Promise.all([
       supabase
         .from('transactions')
         .select('created_at')
         .order('created_at', { ascending: false })
+        .limit(1),
+      supabase
+        .from('transactions')
+        .select('updated_at')
+        .order('updated_at', { ascending: false })
         .limit(1),
       supabase.from('transactions').select('id', { count: 'exact', head: true }),
     ]);
@@ -157,6 +166,12 @@ export async function GET(request: NextRequest) {
     if (latestTxRes.error) {
       return NextResponse.json(
         { error: 'Failed to fetch latest transaction marker', details: latestTxRes.error.message },
+        { status: 500 }
+      );
+    }
+    if (latestUpdateRes.error) {
+      return NextResponse.json(
+        { error: 'Failed to fetch latest transaction update marker', details: latestUpdateRes.error.message },
         { status: 500 }
       );
     }
@@ -168,8 +183,9 @@ export async function GET(request: NextRequest) {
     }
 
     const latestCreatedAt = latestTxRes.data?.[0]?.created_at || 'none';
+    const latestUpdatedAt = latestUpdateRes.data?.[0]?.updated_at || 'none';
     const txCount = txCountRes.count || 0;
-    const markerKey = `analytics-v2|${latestCreatedAt}|${txCount}|${baseCurrency}|${timeRange}`;
+    const markerKey = `analytics-v4|${latestCreatedAt}|${latestUpdatedAt}|${txCount}|${baseCurrency}|${timeRange}`;
     if (!globalThis.__analyticsCacheMap) {
       globalThis.__analyticsCacheMap = new Map<string, AnalyticsCacheEntry>();
     }
@@ -197,32 +213,8 @@ export async function GET(request: NextRequest) {
     const isInRange = (tx: RawTransaction) =>
       new Date(tx.transaction_date).getTime() >= cutoffDate.getTime();
 
-    const uniqueAssetsMap = new Map<string, Asset>();
-    for (const tx of nonCashTransactions) {
-      const key = keyFor(tx.symbol, tx.market_type);
-      if (!uniqueAssetsMap.has(key)) {
-        uniqueAssetsMap.set(key, {
-          id: key,
-          symbol: tx.symbol.toUpperCase(),
-          market_type: tx.market_type,
-          quantity: 1,
-        });
-      }
-    }
-    const uniqueAssets = Array.from(uniqueAssetsMap.values());
-
-    const fallbackPriceMap = new Map<string, number>();
-    const assetNameByKey = new Map<string, string>();
     const investedByAsset = new Map<string, number>();
     const holdingAccByAsset = new Map<string, HoldingAccumulator>();
-    if (uniqueAssets.length > 0) {
-      const fallbackPricing = await calculatePortfolioTotal({ assets: uniqueAssets, baseCurrency });
-      for (const detail of fallbackPricing.assetDetails) {
-        const assetKey = keyFor(detail.asset.symbol, detail.asset.market_type);
-        if (detail.price > 0) fallbackPriceMap.set(assetKey, detail.price);
-        if (detail.name && detail.name.trim()) assetNameByKey.set(assetKey, detail.name.trim());
-      }
-    }
 
     const { data: holdingsData, error: holdingsError } = await supabase
       .from('current_holdings')
@@ -233,6 +225,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to fetch holdings', details: holdingsError.message }, { status: 500 });
     }
 
+    const holdingQtyByAsset = new Map<string, number>();
+    for (const h of holdingsData || []) {
+      holdingQtyByAsset.set(
+        keyFor(String(h.symbol), h.market_type),
+        Number(h.quantity)
+      );
+    }
+
     const holdingsAssets: Asset[] = (holdingsData || []).map((h, idx) => ({
       id: `${h.symbol}-${idx}`,
       symbol: String(h.symbol).toUpperCase(),
@@ -240,47 +240,28 @@ export async function GET(request: NextRequest) {
       quantity: Number(h.quantity),
     }));
 
-    let holdingsValuation: Awaited<ReturnType<typeof calculatePortfolioTotal>> | null = null;
-    for (let attempt = 1; attempt <= HOLDINGS_VALUATION_RETRY_ATTEMPTS; attempt++) {
-      const candidate = await calculatePortfolioTotal({
-        assets: holdingsAssets,
-        baseCurrency,
-      });
-      holdingsValuation = candidate;
-      if (!hasInvalidHeldCryptoValues(candidate)) break;
-      if (attempt < HOLDINGS_VALUATION_RETRY_ATTEMPTS) {
-        console.warn(
-          `[analytics] Invalid held crypto valuation detected, retry ${attempt}/${HOLDINGS_VALUATION_RETRY_ATTEMPTS}`
-        );
-        await sleep(HOLDINGS_VALUATION_RETRY_DELAY_MS);
-      }
-    }
-    if (!holdingsValuation) {
-      throw new Error('Failed to build holdings valuation.');
-    }
-    if (hasInvalidHeldCryptoValues(holdingsValuation)) {
-      throw new Error('Crypto holdings valuation remained invalid after retries.');
-    }
+    const holdingsValuation = await calculatePortfolioTotal({
+      assets: holdingsAssets,
+      baseCurrency,
+      softFailCrypto: true,
+    });
+    const pricingWarnings = holdingsValuation.failedAssets.map(
+      (f) => `${f.asset.symbol} (${f.asset.market_type}): ${f.reason}`
+    );
 
-    const currentValueMap = new Map<string, number>();
-    const currentQtyMap = new Map<string, number>();
     for (const detail of holdingsValuation.assetDetails) {
-      const assetKey = keyFor(detail.asset.symbol, detail.asset.market_type);
-      currentValueMap.set(assetKey, detail.value);
-      currentQtyMap.set(assetKey, detail.asset.quantity);
-      if (detail.price > 0 && !fallbackPriceMap.has(assetKey)) {
-        fallbackPriceMap.set(assetKey, detail.price);
-      }
-      if (detail.name && detail.name.trim()) {
-        assetNameByKey.set(assetKey, detail.name.trim());
+      if (
+        detail.asset.market_type === 'CRYPTO' &&
+        detail.asset.quantity > 0 &&
+        detail.price <= 0
+      ) {
+        pricingWarnings.push(
+          `${detail.asset.symbol} (CRYPTO): held quantity priced at 0 due to unavailable quote`
+        );
       }
     }
 
-    const tagByAsset = new Map<string, string>();
-    for (const tx of transactions) {
-      const assetKey = keyFor(tx.symbol, tx.market_type);
-      if (tx.tag && tx.tag.trim()) tagByAsset.set(assetKey, tx.tag.trim());
-    }
+    const tagByAsset = buildTagByAssetFromTransactions(transactions, keyFor);
 
     const lotsByAsset = new Map<string, Lot[]>();
     const closedTrades: ClosedTrade[] = [];
@@ -315,7 +296,7 @@ export async function GET(request: NextRequest) {
       if (!Number.isFinite(qty) || qty <= 0) continue;
 
       const currency = marketCurrency(tx.market_type);
-      const unitPrice = tx.price_per_unit ?? fallbackPriceMap.get(assetKey) ?? 0;
+      const unitPrice = Number(tx.price_per_unit);
       if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue;
 
       const txValueBase = await converter.convert(unitPrice * qty, currency, baseCurrency);
@@ -388,7 +369,7 @@ export async function GET(request: NextRequest) {
       const pnl = proceedsBase - matchedCostBase;
       const returnPct = matchedCostBase > 0 ? (pnl / matchedCostBase) * 100 : 0;
       const holdingDays = weightedHoldingDays / matchedQty;
-      const tag = tx.tag?.trim() || tagByAsset.get(assetKey) || 'Uncategorized';
+      const tag = tagByAsset.get(assetKey) || 'Uncategorized';
 
       closedTrades.push({
         symbol: tx.symbol.toUpperCase(),
@@ -428,6 +409,22 @@ export async function GET(request: NextRequest) {
       holdingAcc.daysQty += weightedHoldingDays;
       holdingAcc.qty += matchedQty;
       holdingAccByAsset.set(assetKey, holdingAcc);
+    }
+
+    for (const [assetKey, lots] of lotsByAsset.entries()) {
+      const holdingQty = holdingQtyByAsset.get(assetKey);
+      if (holdingQty === undefined || holdingQty <= 1e-8) {
+        lotsByAsset.set(assetKey, []);
+        continue;
+      }
+      const lotQty = lots.reduce((sum, lot) => sum + lot.qty, 0);
+      if (lotQty > holdingQty + 1e-6) {
+        lotsByAsset.set(assetKey, trimLotsToTargetQty(lots, holdingQty));
+        const [symbol] = assetKey.split(':');
+        pricingWarnings.push(
+          `${symbol}: FIFO open quantity (${lotQty.toFixed(8)}) exceeded current holdings (${holdingQty.toFixed(8)}); cost basis aligned to holdings.`
+        );
+      }
     }
 
     const remainingCostByAsset = new Map<string, number>();
@@ -571,7 +568,7 @@ export async function GET(request: NextRequest) {
         const tag = tagByAsset.get(assetKey) || 'Uncategorized';
         return {
           symbol,
-          name: assetNameByKey.get(assetKey) || symbol,
+          name: symbol,
           marketType: marketType as MarketType,
           tag,
           currentValue: round2(agg.currentValue),
@@ -711,6 +708,7 @@ export async function GET(request: NextRequest) {
       rangeStart: cutoffDate.toISOString(),
       baseCurrency,
       generatedAt: new Date().toISOString(),
+      ...(pricingWarnings.length > 0 ? { pricingWarnings } : {}),
       reviewPanel: {
         currentValue: round2(totalCurrentValue),
         nonCashValue: round2(nonCashCurrentValue),

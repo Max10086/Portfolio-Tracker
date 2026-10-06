@@ -46,22 +46,39 @@ export interface HoldingsData {
 
 interface HoldingsCardProps {
   onAssetsChanged?: () => void;
+  sharedHoldings?: HoldingsData | null;
+  sharedHoldingsLoading?: boolean;
+  sharedHoldingsError?: string | null;
+  onRefreshSharedHoldings?: () => void;
 }
 
-export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
-  const [holdings, setHoldings] = useState<HoldingsData | null>(null);
+export function HoldingsCard({
+  onAssetsChanged,
+  sharedHoldings,
+  sharedHoldingsLoading,
+  sharedHoldingsError,
+  onRefreshSharedHoldings,
+}: HoldingsCardProps) {
+  const usesSharedHoldings = onRefreshSharedHoldings !== undefined;
+  const [localHoldings, setLocalHoldings] = useState<HoldingsData | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [localLoading, setLocalLoading] = useState(!usesSharedHoldings);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const holdings = usesSharedHoldings ? sharedHoldings ?? null : localHoldings;
+  const loading = usesSharedHoldings ? Boolean(sharedHoldingsLoading) : localLoading;
+  const error = usesSharedHoldings ? sharedHoldingsError ?? null : localError;
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('holdings');
 
   const fetchHoldings = async () => {
+    if (usesSharedHoldings) {
+      onRefreshSharedHoldings?.();
+      return;
+    }
     try {
-      setLoading(true);
-      setError(null);
-      
-      // Fetch from the new transactions API
+      setLocalLoading(true);
+      setLocalError(null);
+
       const response = await fetch('/api/transactions?view=holdings');
       
       if (!response.ok) {
@@ -85,20 +102,20 @@ export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
           value: detail?.value || asset.value || 0,
           currency: detail?.currency || asset.currency || 'USD',
           baseCurrency: data.baseCurrency || 'USD', // Use base currency from API
-          name: detail?.name || asset.name || undefined,
+          name: detail?.name || asset.name || asset.symbol,
         };
       });
 
-      setHoldings({
+      setLocalHoldings({
         ...data,
         assets: assetsWithPrices,
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error('Error fetching holdings:', err);
-      setError(errorMessage);
+      setLocalError(errorMessage);
     } finally {
-      setLoading(false);
+      setLocalLoading(false);
     }
   };
 
@@ -116,16 +133,28 @@ export function HoldingsCard({ onAssetsChanged }: HoldingsCardProps) {
   };
 
   const fetchAll = async () => {
-    await Promise.all([fetchHoldings(), fetchTransactions()]);
+    await Promise.all([
+      usesSharedHoldings ? Promise.resolve(onRefreshSharedHoldings?.()) : fetchHoldings(),
+      fetchTransactions(),
+    ]);
   };
 
   useEffect(() => {
-    fetchAll();
-    
-    // Refresh prices every 5 minutes
-    const interval = setInterval(fetchAll, 5 * 60 * 1000);
+    fetchTransactions();
+    if (!usesSharedHoldings) {
+      fetchHoldings();
+    }
+
+    const interval = setInterval(() => {
+      void fetchTransactions();
+      if (usesSharedHoldings) {
+        onRefreshSharedHoldings?.();
+      } else {
+        void fetchHoldings();
+      }
+    }, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [usesSharedHoldings, onRefreshSharedHoldings]);
 
   const handleAssetAdded = () => {
     setIsDialogOpen(false);

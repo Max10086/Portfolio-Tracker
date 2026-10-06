@@ -29,6 +29,17 @@ function errorMessage(error: unknown) {
   return 'Unknown error';
 }
 
+function isUsableLlmSummary(summary: unknown): summary is Record<string, unknown> {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return false;
+  const record = summary as Record<string, unknown>;
+  return record.historical_context != null && record.focus_context != null;
+}
+
+function assertNonEmptyAnalysis(analysis: string, provider: Provider) {
+  if (analysis.trim()) return;
+  throw new Error(`${provider} returned empty review content. Try another model or provider.`);
+}
+
 async function fetchJsonWithRetry(
   input: string,
   init: RequestInit,
@@ -116,7 +127,38 @@ ${JSON.stringify(summary, null, 2)}
 `;
 }
 
+function normalizeDeepSeekModel(model: string): string {
+  const trimmed = model.trim();
+  if (!trimmed || trimmed === 'deepseek-v4-flash' || trimmed === 'deepseek-chat') {
+    return 'deepseek-flash';
+  }
+  return trimmed;
+}
+
+function extractDeepSeekText(payload: Record<string, unknown>): string {
+  const choice = payload?.choices as Array<Record<string, unknown>> | undefined;
+  const first = choice?.[0];
+  const message = (first?.message as Record<string, unknown> | undefined) || {};
+  const content = typeof message.content === 'string' ? message.content.trim() : '';
+  const reasoning =
+    typeof message.reasoning_content === 'string' ? message.reasoning_content.trim() : '';
+  if (content) return content;
+  if (reasoning) return reasoning;
+  const finishReason = typeof first?.finish_reason === 'string' ? first.finish_reason : '';
+  if (finishReason === 'length') {
+    throw new Error(
+      'DeepSeek output hit max_tokens before producing visible text. Try a shorter analysis range.'
+    );
+  }
+  console.warn('[ai-review] DeepSeek returned empty assistant message', {
+    finishReason,
+    messageKeys: Object.keys(message),
+  });
+  return '';
+}
+
 async function callDeepSeek(prompt: string, model: string, apiKey: string) {
+  const resolvedModel = normalizeDeepSeekModel(model);
   const { response, payload } = await fetchJsonWithRetry(
     'https://api.deepseek.com/chat/completions',
     {
@@ -126,19 +168,33 @@ async function callDeepSeek(prompt: string, model: string, apiKey: string) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model,
+        model: resolvedModel,
         messages: [
-          { role: 'system', content: 'You are a professional quant trading review assistant.' },
+          {
+            role: 'system',
+            content:
+              'You are a professional quant trading review assistant. Reply in Chinese with the requested structured sections.',
+          },
           { role: 'user', content: prompt },
         ],
         temperature: 0.2,
-        max_tokens: 1800,
+        max_tokens: 4096,
+        thinking: { type: 'disabled' },
       }),
     },
-    { retries: 2, timeoutMs: 90000 }
+    { retries: 2, timeoutMs: 120000 }
   );
-  if (!response.ok) throw new Error(payload?.error?.message || 'DeepSeek request failed');
-  return payload?.choices?.[0]?.message?.content || '';
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      (typeof payload?.message === 'string' ? payload.message : '') ||
+      'DeepSeek request failed';
+    if (/invalid|authentication|unauthorized/i.test(message)) {
+      throw new Error(`DeepSeek API key rejected: ${message}. Check DEEPSEEK_API_KEY in .env.local.`);
+    }
+    throw new Error(message);
+  }
+  return extractDeepSeekText(payload as Record<string, unknown>);
 }
 
 async function callKimi(prompt: string, model: string, apiKey: string) {
@@ -219,16 +275,14 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
-      model = model || 'deepseek-v4-flash';
+      model = model || 'deepseek-flash';
       if (mode === 'title') {
         const source = (body.reviewOutput || '').slice(0, 4000);
         const titlePrompt = `请根据以下交易复盘内容，生成一个非常简短的中文标题（不超过12个字），仅返回标题本身，不要标点，不要解释。\n\n复盘内容：\n${source}`;
         analysis = await callDeepSeek(titlePrompt, model, apiKey);
       } else {
-        const hasInlineSummary =
-          body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
-        if (!hasInlineSummary) {
+        if (!isUsableLlmSummary(summaryPayload)) {
           const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
@@ -249,6 +303,7 @@ export async function POST(request: NextRequest) {
         }
         const prompt = buildPrompt(summaryPayload, promptTemplate, userNotes);
         analysis = await callDeepSeek(prompt, model, apiKey);
+        assertNonEmptyAnalysis(analysis, provider);
         return NextResponse.json({
           provider,
           model,
@@ -272,10 +327,8 @@ export async function POST(request: NextRequest) {
         const titlePrompt = `请根据以下交易复盘内容，生成一个非常简短的中文标题（不超过12个字），仅返回标题本身，不要标点，不要解释。\n\n复盘内容：\n${source}`;
         analysis = await callGemini(titlePrompt, model, apiKey);
       } else {
-        const hasInlineSummary =
-          body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
-        if (!hasInlineSummary) {
+        if (!isUsableLlmSummary(summaryPayload)) {
           const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
@@ -296,6 +349,7 @@ export async function POST(request: NextRequest) {
         }
         const prompt = buildPrompt(summaryPayload, promptTemplate, userNotes);
         analysis = await callGemini(prompt, model, apiKey);
+        assertNonEmptyAnalysis(analysis, provider);
         return NextResponse.json({
           provider,
           model,
@@ -319,10 +373,8 @@ export async function POST(request: NextRequest) {
         const titlePrompt = `请根据以下交易复盘内容，生成一个非常简短的中文标题（不超过12个字），仅返回标题本身，不要标点，不要解释。\n\n复盘内容：\n${source}`;
         analysis = await callKimi(titlePrompt, model, apiKey);
       } else {
-        const hasInlineSummary =
-          body.summary !== null && typeof body.summary === 'object' && !Array.isArray(body.summary);
         let summaryPayload: unknown = body.summary;
-        if (!hasInlineSummary) {
+        if (!isUsableLlmSummary(summaryPayload)) {
           const summaryUrl = new URL('/api/analytics/llm-summary', resolveBaseUrl(request));
           summaryUrl.searchParams.set('timeRange', timeRange);
           const summaryResponse = await fetch(summaryUrl.toString(), {
@@ -343,6 +395,7 @@ export async function POST(request: NextRequest) {
         }
         const prompt = buildPrompt(summaryPayload, promptTemplate, userNotes);
         analysis = await callKimi(prompt, model, apiKey);
+        assertNonEmptyAnalysis(analysis, provider);
         return NextResponse.json({
           provider,
           model,

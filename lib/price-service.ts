@@ -57,6 +57,23 @@ class PriceCache {
 // Global price cache
 const priceCache = new PriceCache();
 
+const cryptoPriceInflight = new Map<string, Promise<PriceResult>>();
+
+function portfolioTotalCacheKey(assets: Asset[], baseCurrency: string): string {
+  const normalized = [...assets]
+    .map((a) => `${a.market_type}:${a.symbol.toUpperCase()}:${a.quantity}`)
+    .sort()
+    .join('|');
+  return `${baseCurrency}|${normalized}`;
+}
+
+const portfolioTotalInflight = new Map<string, Promise<PortfolioCalculationResult>>();
+const portfolioTotalResultCache = new Map<
+  string,
+  { generatedAt: number; result: PortfolioCalculationResult }
+>();
+const PORTFOLIO_TOTAL_CACHE_TTL_MS = 60 * 1000;
+
 // Utility: delay function
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -342,63 +359,68 @@ export class HKStockFetcher extends TencentFinanceFetcher implements PriceFetche
   }
 }
 
-// Crypto Fetcher using CoinGecko API (free, no API key required)
+// Crypto: Binance public market data first, CoinGecko fallback (no API keys)
 export class CryptoFetcher implements PriceFetcher {
-  private readonly baseUrl = 'https://api.coingecko.com/api/v3';
+  private readonly binanceBaseUrl = 'https://data-api.binance.vision';
+  private readonly coinGeckoBaseUrl = 'https://api.coingecko.com/api/v3';
+  private readonly fetchTimeoutMs = 15_000;
   
   supportsMarket(marketType: MarketType): boolean {
     return marketType === 'CRYPTO';
   }
 
   async fetchPrice(symbol: string): Promise<PriceResult> {
-    // Check cache first
     const cacheKey = `CRYPTO:${symbol}`;
     const cached = priceCache.get(cacheKey);
     if (cached) {
       return cached;
     }
 
-    try {
-      const normalizedSymbol = symbol.toLowerCase();
-      let coinId = this.mapSymbolToCoinGeckoId(normalizedSymbol);
-      
-      // If symbol is not in the map, try to find it using CoinGecko search API
-      if (coinId === normalizedSymbol) {
-        coinId = await this.searchCoinGeckoId(normalizedSymbol);
-      }
-      
-      const response = await fetch(
-        `${this.baseUrl}/simple/price?ids=${coinId}&vs_currencies=usd`,
-        {
-          headers: {
-            'Accept': 'application/json',
-          },
-        }
-      );
+    const inflightKey = symbol.toUpperCase();
+    const pending = cryptoPriceInflight.get(inflightKey);
+    if (pending) {
+      return pending;
+    }
 
-      if (!response.ok) {
-        throw new Error(`CoinGecko API error: ${response.statusText}`);
-      }
+    const work = this.fetchPriceLive(symbol, cacheKey).finally(() => {
+      cryptoPriceInflight.delete(inflightKey);
+    });
+    cryptoPriceInflight.set(inflightKey, work);
+    return work;
+  }
 
-      const data = await response.json();
-      
-      if (!data[coinId] || !data[coinId].usd) {
-        throw new Error(`No price data found for ${symbol} (CoinGecko ID: ${coinId})`);
-      }
+  private async fetchPriceLive(symbol: string, cacheKey: string): Promise<PriceResult> {
+    const normalizedSymbol = symbol.toLowerCase();
+    const upperSymbol = symbol.toUpperCase();
+    const name = this.getCryptoName(normalizedSymbol);
 
-      // Get full name from coins list
-      const name = this.getCryptoName(normalizedSymbol);
-
-      const result: PriceResult = {
-        price: data[coinId].usd,
-        currency: 'USD',
-        symbol: symbol.toUpperCase(),
-        name: name,
-      };
-
+    const cacheAndReturn = (result: PriceResult, source: string): PriceResult => {
       priceCache.set(cacheKey, result);
-      console.log(`[CryptoFetcher] Successfully fetched ${symbol} (${name}): $${result.price}`);
+      console.log(
+        `[CryptoFetcher] ${source} ${upperSymbol} (${name}): $${result.price}`
+      );
       return result;
+    };
+
+    try {
+      const stable = this.stablecoinPrice(upperSymbol, name);
+      if (stable) {
+        return cacheAndReturn(stable, 'Stablecoin');
+      }
+
+      try {
+        const fromBinance = await this.fetchFromBinance(upperSymbol, name);
+        return cacheAndReturn(fromBinance, 'Binance');
+      } catch (binanceError) {
+        const binanceMessage =
+          binanceError instanceof Error ? binanceError.message : 'Unknown Binance error';
+        console.warn(
+          `[CryptoFetcher] Binance failed for ${upperSymbol}, trying CoinGecko: ${binanceMessage}`
+        );
+      }
+
+      const fromCoinGecko = await this.fetchFromCoinGecko(normalizedSymbol, upperSymbol, name);
+      return cacheAndReturn(fromCoinGecko, 'CoinGecko');
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[CryptoFetcher] Failed to fetch ${symbol}:`, errorMessage);
@@ -411,16 +433,106 @@ export class CryptoFetcher implements PriceFetcher {
     }
   }
 
+  private stablecoinPrice(symbol: string, name: string): PriceResult | null {
+    if (symbol === 'USDT') {
+      return { price: 1, currency: 'USD', symbol, name };
+    }
+    return null;
+  }
+
+  private mapSymbolToBinancePair(symbol: string): string | null {
+    const overrides: Record<string, string> = {
+      USDC: 'USDCUSDT',
+    };
+    const upper = symbol.toUpperCase();
+    if (upper in overrides) {
+      return overrides[upper];
+    }
+    if (upper.endsWith('USDT') || upper.endsWith('USDC') || upper.endsWith('BUSD')) {
+      return upper;
+    }
+    return `${upper}USDT`;
+  }
+
+  private async fetchFromBinance(symbol: string, name: string): Promise<PriceResult> {
+    const pair = this.mapSymbolToBinancePair(symbol);
+    if (!pair) {
+      throw new Error(`No Binance trading pair mapping for ${symbol}`);
+    }
+
+    const url = `${this.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(pair)}`;
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(this.fetchTimeoutMs),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(
+        `Binance ticker/price failed (${response.status}): ${detail.slice(0, 160) || response.statusText}`
+      );
+    }
+
+    const data = (await response.json()) as { symbol?: string; price?: string };
+    const price = Number(data.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`Invalid Binance price for ${pair}: ${data.price}`);
+    }
+
+    return {
+      price,
+      currency: 'USD',
+      symbol,
+      name,
+    };
+  }
+
+  private async fetchFromCoinGecko(
+    normalizedSymbol: string,
+    upperSymbol: string,
+    name: string
+  ): Promise<PriceResult> {
+    let coinId = this.mapSymbolToCoinGeckoId(normalizedSymbol);
+
+    if (coinId === normalizedSymbol) {
+      coinId = await this.searchCoinGeckoId(normalizedSymbol);
+    }
+
+    const response = await fetch(
+      `${this.coinGeckoBaseUrl}/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(this.fetchTimeoutMs),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko API error: ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as Record<string, { usd?: number }>;
+    const usd = data[coinId]?.usd;
+    if (!Number.isFinite(usd) || (usd as number) <= 0) {
+      throw new Error(`No price data found for ${upperSymbol} (CoinGecko ID: ${coinId})`);
+    }
+
+    return {
+      price: usd as number,
+      currency: 'USD',
+      symbol: upperSymbol,
+      name,
+    };
+  }
+
   // Search for CoinGecko ID by symbol using the search API
   private async searchCoinGeckoId(symbol: string): Promise<string> {
     try {
       console.log(`[CryptoFetcher] Searching CoinGecko for symbol: ${symbol}`);
       const response = await fetch(
-        `${this.baseUrl}/search?query=${encodeURIComponent(symbol)}`,
+        `${this.coinGeckoBaseUrl}/search?query=${encodeURIComponent(symbol)}`,
         {
-          headers: {
-            'Accept': 'application/json',
-          },
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(this.fetchTimeoutMs),
         }
       );
 
@@ -483,6 +595,7 @@ export class CryptoFetcher implements PriceFetcher {
       'icp': 'internet-computer',
       'fil': 'filecoin',
       'paxg': 'pax-gold',
+      'hype': 'hyperliquid',
     };
 
     return symbolMap[symbol] || symbol;
@@ -510,6 +623,7 @@ export class CryptoFetcher implements PriceFetcher {
       'icp': 'Internet Computer',
       'fil': 'Filecoin',
       'paxg': 'PAX Gold',
+      'hype': 'Hyperliquid',
     };
 
     return nameMap[symbol] || symbol.toUpperCase();
@@ -654,11 +768,50 @@ class PriceFetcherFactory {
   }
 }
 
+function assetNameKey(symbol: string, marketType: MarketType): string {
+  return `${symbol.trim().toUpperCase()}:${marketType}`;
+}
+
+/** Resolve display names via the same price fetchers used for Portfolio holdings. */
+export async function resolveAssetDisplayNames(
+  assets: Array<{ symbol: string; market_type: MarketType }>
+): Promise<Record<string, string>> {
+  const factory = new PriceFetcherFactory();
+  const names: Record<string, string> = {};
+  const seen = new Set<string>();
+
+  for (const item of assets) {
+    const marketType = item.market_type;
+    const key = assetNameKey(item.symbol, marketType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (marketType === 'CASH') {
+      names[key] = item.symbol.trim().toUpperCase();
+      continue;
+    }
+
+    try {
+      const fetcher = factory.getFetcher(marketType);
+      const result = await fetcher.fetchPrice(item.symbol);
+      names[key] = result.name?.trim() || item.symbol.trim().toUpperCase();
+    } catch {
+      names[key] = item.symbol.trim().toUpperCase();
+    }
+
+    await delay(200);
+  }
+
+  return names;
+}
+
 // Main function to calculate portfolio total
 export interface CalculatePortfolioTotalOptions {
   baseCurrency?: string;
   assets: Asset[];
   failOnPriceError?: boolean;
+  /** When true, crypto price failures degrade to zero value instead of throwing. */
+  softFailCrypto?: boolean;
 }
 
 export interface PortfolioCalculationResult {
@@ -677,18 +830,18 @@ export interface PortfolioCalculationResult {
   }>;
 }
 
-export async function calculatePortfolioTotal(
+async function calculatePortfolioTotalInner(
   options: CalculatePortfolioTotalOptions
 ): Promise<PortfolioCalculationResult> {
-  const { assets, baseCurrency = 'USD', failOnPriceError = false } = options;
+  const { assets, baseCurrency = 'USD', failOnPriceError = false, softFailCrypto = false } = options;
   const factory = new PriceFetcherFactory();
   const converter = new CurrencyConverter();
 
   const assetDetails: PortfolioCalculationResult['assetDetails'] = [];
   const failedAssets: PortfolioCalculationResult['failedAssets'] = [];
   let totalValue = 0;
-  const CRYPTO_RETRY_ATTEMPTS = 8;
-  const CRYPTO_RETRY_DELAY_MS = 1200;
+  const CRYPTO_RETRY_ATTEMPTS = 3;
+  const CRYPTO_RETRY_DELAY_MS = 600;
 
   // Process assets sequentially with delay to avoid rate limiting
   for (const asset of assets) {
@@ -724,6 +877,19 @@ export async function calculatePortfolioTotal(
               `[calculatePortfolioTotal] Using stale crypto price for ${asset.symbol} after retries`
             );
             priceResult = stale;
+          } else if (softFailCrypto || asset.market_type === 'CRYPTO') {
+            const reason =
+              lastError instanceof Error ? lastError.message : 'Unknown crypto price error';
+            failedAssets.push({ asset, reason });
+            assetDetails.push({
+              asset,
+              price: 0,
+              value: 0,
+              currency: baseCurrency,
+              name: asset.symbol.toUpperCase(),
+            });
+            await delay(200);
+            continue;
           } else {
             throw new Error(
               `Failed to fetch valid crypto price for ${asset.symbol} after ${CRYPTO_RETRY_ATTEMPTS} retries: ${
@@ -762,7 +928,7 @@ export async function calculatePortfolioTotal(
     } catch (error) {
       console.error(`Error processing asset ${asset.symbol}:`, error);
       const reason = error instanceof Error ? error.message : 'Unknown error';
-      if (asset.market_type === 'CRYPTO') {
+      if (asset.market_type === 'CRYPTO' && !softFailCrypto) {
         throw new Error(`Crypto price fetch failed for ${asset.symbol}: ${reason}`);
       }
       failedAssets.push({ asset, reason });
@@ -787,6 +953,42 @@ export async function calculatePortfolioTotal(
     failedAssets,
     assetDetails,
   };
+}
+
+export async function calculatePortfolioTotal(
+  options: CalculatePortfolioTotalOptions
+): Promise<PortfolioCalculationResult> {
+  if (options.assets.length === 0) {
+    return calculatePortfolioTotalInner(options);
+  }
+
+  const baseCurrency = options.baseCurrency || 'USD';
+  const key = portfolioTotalCacheKey(options.assets, baseCurrency);
+  const cached = portfolioTotalResultCache.get(key);
+  if (cached && Date.now() - cached.generatedAt <= PORTFOLIO_TOTAL_CACHE_TTL_MS) {
+    return cached.result;
+  }
+
+  const inflight = portfolioTotalInflight.get(key);
+  if (inflight) {
+    return inflight;
+  }
+
+  const promise = calculatePortfolioTotalInner(options)
+    .then((result) => {
+      portfolioTotalResultCache.set(key, { generatedAt: Date.now(), result });
+      if (portfolioTotalResultCache.size > 30) {
+        const staleKey = portfolioTotalResultCache.keys().next().value;
+        if (staleKey) portfolioTotalResultCache.delete(staleKey);
+      }
+      return result;
+    })
+    .finally(() => {
+      portfolioTotalInflight.delete(key);
+    });
+
+  portfolioTotalInflight.set(key, promise);
+  return promise;
 }
 
 // Export cache clear function for testing

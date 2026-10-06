@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
+import { syncTagForAssetTransactions } from '@/lib/sync-asset-tag';
 
 
 
@@ -115,8 +116,10 @@ export async function PUT(
       updateData.notes = notes || null;
     }
 
-    if (tag !== undefined) {
-      updateData.tag = tag && String(tag).trim() ? String(tag).trim() : null;
+    const tagUpdate =
+      tag !== undefined ? (tag && String(tag).trim() ? String(tag).trim() : null) : undefined;
+    if (tagUpdate !== undefined) {
+      updateData.tag = tagUpdate;
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -145,6 +148,29 @@ export async function PUT(
         { error: 'Failed to update transaction', details: error.message },
         { status: 500 }
       );
+    }
+
+    if (tagUpdate !== undefined && data) {
+      const { error: syncError } = await syncTagForAssetTransactions(
+        supabase,
+        data.symbol,
+        data.market_type,
+        tagUpdate
+      );
+      if (syncError) {
+        return NextResponse.json(
+          { error: 'Transaction updated but failed to sync tag', details: syncError.message },
+          { status: 500 }
+        );
+      }
+      const { data: refreshed, error: refreshError } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('id', id)
+        .single();
+      if (!refreshError && refreshed) {
+        return NextResponse.json({ transaction: refreshed });
+      }
     }
 
     return NextResponse.json({ transaction: data });

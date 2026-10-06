@@ -93,7 +93,13 @@ export default function Home() {
           />
         </div>
         <div className="lg:col-span-1">
-          <HoldingsCard onAssetsChanged={handleAssetsChanged} />
+          <HoldingsCard
+            onAssetsChanged={handleAssetsChanged}
+            sharedHoldings={holdings}
+            sharedHoldingsLoading={loading}
+            sharedHoldingsError={error}
+            onRefreshSharedHoldings={fetchHoldings}
+          />
         </div>
       </div>
 
