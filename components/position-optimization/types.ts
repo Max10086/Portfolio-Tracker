@@ -1,3 +1,5 @@
+import { normalizeAssetNameKey } from '@/lib/asset-name-cache';
+
 export interface BreakdownRow {
   key: string;
   realizedPnL: number;
@@ -54,7 +56,7 @@ export const STOP_TIER_META: Record<
 };
 
 export function assetRowKey(symbol: string, marketType: string): string {
-  return `${symbol}:${marketType}`;
+  return normalizeAssetNameKey(symbol, marketType);
 }
 
 export interface MonthlyPerformanceRow {

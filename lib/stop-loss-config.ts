@@ -1,4 +1,5 @@
 import type { AssetStopLossConfig, StopTierId } from '@/components/position-optimization/types';
+import { normalizeAssetNameKey } from '@/lib/asset-name-cache';
 
 export const STOP_LOSS_STORAGE_KEY = 'portfolio-stop-loss-v1';
 export const STOP_LOSS_ACK_STORAGE_KEY = 'portfolio-stop-loss-ack-v1';
@@ -11,8 +12,21 @@ export interface StopTierAcknowledgement {
 
 export type StopAckMap = Record<string, StopTierAcknowledgement>;
 
-function ackStorageKey(assetKey: string, tierId: StopTierId): string {
+export function ackStorageKey(assetKey: string, tierId: StopTierId): string {
   return `${assetKey}:${tierId}`;
+}
+
+export function parseAssetKey(assetKey: string): { symbol: string; market_type: string } {
+  const colon = assetKey.indexOf(':');
+  if (colon <= 0) throw new Error(`Invalid asset key: ${assetKey}`);
+  return {
+    symbol: assetKey.slice(0, colon).trim().toUpperCase(),
+    market_type: assetKey.slice(colon + 1).trim().toUpperCase(),
+  };
+}
+
+export function normalizeStopAssetKey(symbol: string, marketType: string): string {
+  return normalizeAssetNameKey(symbol, marketType);
 }
 
 export function emptyStopConfig(): AssetStopLossConfig {

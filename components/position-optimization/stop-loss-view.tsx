@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
@@ -15,16 +15,22 @@ import {
   assetRowKey,
 } from './types';
 import {
+  ackStorageKey,
   acknowledgeTier,
   clearAckIfRecovered,
   emptyStopConfig,
   isTierAcknowledged,
-  loadStopAcknowledgements,
   loadStopLossConfigs,
   saveStopAcknowledgements,
   saveStopLossConfigs,
   type StopAckMap,
 } from '@/lib/stop-loss-config';
+import {
+  ackStopLossRemote,
+  clearStopLossAckRemote,
+  fetchStopLossRemote,
+  saveStopLossRemote,
+} from '@/lib/stop-loss-client';
 
 interface StopLossViewProps {
   assets: AssetRow[];
@@ -99,6 +105,12 @@ function formatUnitPrice(price: number, marketType: string, currency: string): s
 }
 
 const TIER_ORDER: StopTierId[] = ['relief', 'retreat', 'bailout'];
+
+function configHasData(config: AssetStopLossConfig): boolean {
+  return TIER_ORDER.some(
+    (id) => config[id].price != null || config[id].sellPct != null
+  );
+}
 
 const TIER_UI: Record<
   StopTierId,
@@ -217,10 +229,12 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
   );
 
   const [drafts, setDrafts] = useState<Record<string, AssetDraft>>({});
-  const [acks, setAcks] = useState<StopAckMap>(() =>
-    typeof window !== 'undefined' ? loadStopAcknowledgements() : {}
-  );
+  const [acks, setAcks] = useState<StopAckMap>({});
+  const [remoteLoaded, setRemoteLoaded] = useState(false);
+  const [tableReady, setTableReady] = useState(true);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [expandedEdit, setExpandedEdit] = useState<Record<string, boolean>>({});
+  const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const heldKeysSignature = useMemo(
     () =>
@@ -232,6 +246,49 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
   );
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const remote = await fetchStopLossRemote();
+        if (cancelled) return;
+
+        setTableReady(remote.tableReady);
+        const local = loadStopLossConfigs();
+        const mergedConfigs = { ...remote.configs };
+
+        if (remote.tableReady) {
+          for (const [key, config] of Object.entries(local)) {
+            if (!mergedConfigs[key] && configHasData(config)) {
+              try {
+                await saveStopLossRemote(key, config);
+                mergedConfigs[key] = config;
+              } catch {
+                mergedConfigs[key] = config;
+              }
+            }
+          }
+        } else {
+          Object.assign(mergedConfigs, local);
+        }
+
+        saveStopLossConfigs(mergedConfigs);
+        setAcks(remote.acks);
+        saveStopAcknowledgements(remote.acks);
+        setSyncError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setSyncError(err instanceof Error ? err.message : 'Failed to load stop settings');
+      } finally {
+        if (!cancelled) setRemoteLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!remoteLoaded) return;
     const stored = loadStopLossConfigs();
     setDrafts((prev) => {
       const next = { ...prev };
@@ -243,13 +300,26 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
       }
       return next;
     });
-  }, [heldKeysSignature, heldAssets]);
+  }, [heldKeysSignature, heldAssets, remoteLoaded]);
 
   const persistDraft = useCallback((assetKey: string, draft: AssetDraft) => {
+    const config = draftToConfig(draft);
     const stored = loadStopLossConfigs();
-    stored[assetKey] = draftToConfig(draft);
+    stored[assetKey] = config;
     saveStopLossConfigs(stored);
-  }, []);
+
+    if (!tableReady) return;
+
+    const existing = saveTimersRef.current[assetKey];
+    if (existing) clearTimeout(existing);
+    saveTimersRef.current[assetKey] = setTimeout(() => {
+      void saveStopLossRemote(assetKey, config)
+        .then(() => setSyncError(null))
+        .catch((err) => {
+          setSyncError(err instanceof Error ? err.message : 'Failed to save stop settings');
+        });
+    }, 450);
+  }, [tableReady]);
 
   const updateField = (
     assetKey: string,
@@ -336,22 +406,30 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
   }, [heldAssets, drafts, acks]);
 
   useEffect(() => {
+    if (!remoteLoaded) return;
     setAcks((prev) => {
       let next = prev;
-      let changed = false;
+      const clearedTiers: Array<{ assetKey: string; tierId: StopTierId }> = [];
       for (const row of evaluated) {
         for (const t of row.tiers) {
-          const cleared = clearAckIfRecovered(next, row.key, t.tierId, row.price, t.stopPrice);
-          if (cleared !== next) {
-            next = cleared;
-            changed = true;
+          const beforeKey = ackStorageKey(row.key, t.tierId);
+          const hadAck = Boolean(next[beforeKey]);
+          next = clearAckIfRecovered(next, row.key, t.tierId, row.price, t.stopPrice);
+          if (hadAck && !next[beforeKey]) {
+            clearedTiers.push({ assetKey: row.key, tierId: t.tierId });
           }
         }
       }
-      if (changed) saveStopAcknowledgements(next);
-      return changed ? next : prev;
+      if (clearedTiers.length === 0) return prev;
+      saveStopAcknowledgements(next);
+      if (tableReady) {
+        for (const item of clearedTiers) {
+          void clearStopLossAckRemote(item.assetKey, item.tierId).catch(() => {});
+        }
+      }
+      return next;
     });
-  }, [evaluated]);
+  }, [evaluated, remoteLoaded, tableReady]);
 
   const acknowledgeOne = (
     assetKey: string,
@@ -362,19 +440,46 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     const next = acknowledgeTier(acks, assetKey, tierId, stopPrice, sellPct);
     saveStopAcknowledgements(next);
     setAcks(next);
+    if (tableReady) {
+      void ackStopLossRemote(assetKey, tierId, stopPrice, sellPct).catch((err) => {
+        setSyncError(err instanceof Error ? err.message : 'Failed to save acknowledgement');
+      });
+    }
   };
 
   const acknowledgeAllActive = () => {
     let next = { ...acks };
+    const pending: Array<{
+      assetKey: string;
+      tierId: StopTierId;
+      stopPrice: number;
+      sellPct: number;
+    }> = [];
     for (const row of evaluated) {
       for (const t of row.activeAlerts) {
         if (t.stopPrice != null && t.sellPct != null) {
           next = acknowledgeTier(next, row.key, t.tierId, t.stopPrice, t.sellPct);
+          pending.push({
+            assetKey: row.key,
+            tierId: t.tierId,
+            stopPrice: t.stopPrice,
+            sellPct: t.sellPct,
+          });
         }
       }
     }
     saveStopAcknowledgements(next);
     setAcks(next);
+    if (tableReady) {
+      for (const item of pending) {
+        void ackStopLossRemote(
+          item.assetKey,
+          item.tierId,
+          item.stopPrice,
+          item.sellPct
+        ).catch(() => {});
+      }
+    }
   };
 
   const activeAlertCount = evaluated.reduce((n, row) => n + row.activeAlerts.length, 0);
@@ -400,6 +505,22 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
 
   return (
     <div className="space-y-6">
+      {!remoteLoaded && (
+        <p className="text-sm text-muted-foreground">Loading stop-loss settings…</p>
+      )}
+      {!tableReady && remoteLoaded && (
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-950 dark:text-amber-100">
+          Cloud save unavailable: run Supabase migrations{' '}
+          <code className="text-xs">006_asset_display_names.sql</code> and{' '}
+          <code className="text-xs">007_asset_stop_loss.sql</code>. Using browser cache only until
+          then.
+        </p>
+      )}
+      {syncError && (
+        <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-900 dark:text-red-100">
+          {syncError}
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-xl border bg-card p-4 shadow-sm">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
