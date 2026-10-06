@@ -39,7 +39,14 @@ import { PnlAttributionView } from '@/components/position-optimization/pnl-attri
 import { MonthlyTimelineView } from '@/components/position-optimization/monthly-timeline-view';
 import { PositionTreemapView } from '@/components/position-optimization/position-treemap-view';
 import { StrategyQualityView } from '@/components/position-optimization/strategy-quality-view';
+import { StopLossView } from '@/components/position-optimization/stop-loss-view';
 import type { ClosedTradeRow } from '@/components/position-optimization/types';
+import {
+  loadAssetNameCache,
+  listMissingAssetNameKeys,
+  mergeAssetNameCache,
+  normalizeAssetNameKey,
+} from '@/lib/asset-name-cache';
 
 interface ReviewPanel {
   currentValue: number;
@@ -120,7 +127,7 @@ interface AnalyticsResponse {
   closedTradesInRange?: ClosedTradeRow[];
 }
 
-type PositionOptTab = 'table' | 'attribution' | 'timeline' | 'treemap' | 'strategy';
+type PositionOptTab = 'table' | 'attribution' | 'timeline' | 'treemap' | 'strategy' | 'stops';
 
 type AiTimeRange = '7d' | '30d' | '90d' | '365d';
 
@@ -152,7 +159,7 @@ function formatDate(value: string): string {
 }
 
 function assetHistoryKey(symbol: string, marketType: string): string {
-  return `${symbol}:${marketType}`;
+  return normalizeAssetNameKey(symbol, marketType);
 }
 
 export function PerformanceInsightsPanel() {
@@ -216,7 +223,9 @@ export function PerformanceInsightsPanel() {
   const [allTransactions, setAllTransactions] = useState<EditableTransaction[]>([]);
   const [txLoading, setTxLoading] = useState(false);
   const [txHistoryReady, setTxHistoryReady] = useState(false);
-  const [assetNameByKey, setAssetNameByKey] = useState<Record<string, string>>({});
+  const [assetNameByKey, setAssetNameByKey] = useState<Record<string, string>>(() =>
+    typeof window !== 'undefined' ? loadAssetNameCache() : {}
+  );
   const [namesLoading, setNamesLoading] = useState(false);
   const [expandedAssetHistory, setExpandedAssetHistory] = useState<Record<string, boolean>>({});
   const [editingTransaction, setEditingTransaction] = useState<EditableTransaction | null>(null);
@@ -306,44 +315,61 @@ export function PerformanceInsightsPanel() {
     void precomputeLlmSummary(aiTimeRange);
   }, [aiSectionOpen, aiTimeRange]);
 
+  const assetKeysSignature = useMemo(() => {
+    if (!data?.breakdowns.byAsset?.length) return '';
+    return data.breakdowns.byAsset
+      .map((a) => assetHistoryKey(a.symbol, a.marketType))
+      .sort()
+      .join('|');
+  }, [data?.breakdowns.byAsset]);
+
   useEffect(() => {
     if (loading || !data) return;
+    setTxHistoryReady(false);
+    void (async () => {
+      await loadTransactions();
+      setTxHistoryReady(true);
+    })();
+  }, [loading, data?.generatedAt]);
 
-    const loadAssetNames = async (assets: AssetRow[]) => {
-      const unique = new Map<string, { symbol: string; market_type: string }>();
-      for (const asset of assets) {
-        const key = assetHistoryKey(asset.symbol, asset.marketType);
-        if (!unique.has(key)) {
-          unique.set(key, { symbol: asset.symbol, market_type: asset.marketType });
-        }
-      }
-      if (unique.size === 0) return;
+  useEffect(() => {
+    if (!data?.breakdowns.byAsset?.length) return;
 
-      setNamesLoading(true);
+    const pairs = data.breakdowns.byAsset.map((asset) => ({
+      symbol: asset.symbol,
+      market_type: asset.marketType,
+    }));
+    const cached = loadAssetNameCache();
+    const missing = listMissingAssetNameKeys(pairs, cached);
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    setNamesLoading(true);
+    void (async () => {
       try {
         const response = await fetch('/api/asset-names', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assets: [...unique.values()] }),
+          body: JSON.stringify({
+            assets: missing.map(({ symbol, market_type }) => ({ symbol, market_type })),
+          }),
         });
-        if (!response.ok) return;
+        if (!response.ok || cancelled) return;
         const payload = (await response.json()) as { names?: Record<string, string> };
-        if (payload.names) {
-          setAssetNameByKey((prev) => ({ ...prev, ...payload.names }));
-        }
+        if (!payload.names || cancelled) return;
+        const merged = mergeAssetNameCache(payload.names);
+        setAssetNameByKey((prev) => ({ ...prev, ...merged }));
       } catch {
         // Keep symbol fallback in UI.
       } finally {
-        setNamesLoading(false);
+        if (!cancelled) setNamesLoading(false);
       }
-    };
-
-    void (async () => {
-      setTxHistoryReady(false);
-      await Promise.all([loadTransactions(), loadAssetNames(data.breakdowns.byAsset)]);
-      setTxHistoryReady(true);
     })();
-  }, [loading, data?.generatedAt]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assetKeysSignature, data?.breakdowns.byAsset]);
 
   const allAssets = useMemo(() => data?.breakdowns.byAsset || [], [data]);
   const groupedByTag = useMemo(() => {
@@ -735,6 +761,9 @@ export function PerformanceInsightsPanel() {
               <TabsTrigger value="strategy" className="text-xs sm:text-sm">
                 Strategy
               </TabsTrigger>
+              <TabsTrigger value="stops" className="text-xs sm:text-sm">
+                Stops
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="attribution" className="mt-0">
@@ -772,6 +801,10 @@ export function PerformanceInsightsPanel() {
                 baseCurrency={baseCurrency}
                 onDrillTag={drillToTagInTable}
               />
+            </TabsContent>
+
+            <TabsContent value="stops" className="mt-0">
+              <StopLossView assets={allAssets} assetNameByKey={assetNameByKey} />
             </TabsContent>
 
             <TabsContent value="table" className="mt-0">

@@ -54,6 +54,9 @@ interface AssetStats {
   avgHoldingDays: number;
   trades: number;
   winRate: number;
+  quantity: number;
+  currentPrice: number;
+  priceCurrency: string;
 }
 
 interface AggregateStats {
@@ -262,6 +265,19 @@ export async function GET(request: NextRequest) {
     }
 
     const tagByAsset = buildTagByAssetFromTransactions(transactions, keyFor);
+
+    const holdingQuoteByAsset = new Map<
+      string,
+      { quantity: number; currentPrice: number; priceCurrency: string }
+    >();
+    for (const detail of holdingsValuation.assetDetails) {
+      if (detail.asset.market_type === 'CASH') continue;
+      holdingQuoteByAsset.set(keyFor(detail.asset.symbol, detail.asset.market_type), {
+        quantity: Number(detail.asset.quantity),
+        currentPrice: Number(detail.price),
+        priceCurrency: detail.currency,
+      });
+    }
 
     const lotsByAsset = new Map<string, Lot[]>();
     const closedTrades: ClosedTrade[] = [];
@@ -566,6 +582,7 @@ export async function GET(request: NextRequest) {
         const holdingAcc = holdingAccByAsset.get(assetKey) || { daysQty: 0, qty: 0 };
         const avgHoldingDays = holdingAcc.qty > 0 ? holdingAcc.daysQty / holdingAcc.qty : 0;
         const tag = tagByAsset.get(assetKey) || 'Uncategorized';
+        const quote = holdingQuoteByAsset.get(assetKey);
         return {
           symbol,
           name: symbol,
@@ -582,6 +599,9 @@ export async function GET(request: NextRequest) {
           avgHoldingDays: round2(avgHoldingDays),
           trades,
           winRate: round2(winRateAsset),
+          quantity: quote ? Number(quote.quantity) : 0,
+          currentPrice: quote ? round2(quote.currentPrice) : 0,
+          priceCurrency: quote?.priceCurrency || baseCurrency,
         };
       })
       .sort((a, b) => b.currentValue - a.currentValue);

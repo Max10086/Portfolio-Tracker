@@ -24,6 +24,37 @@ export interface AssetRow {
   avgHoldingDays: number;
   trades: number;
   winRate: number;
+  /** Open position size (0 if flat). */
+  quantity?: number;
+  /** Last quote in `priceCurrency`. */
+  currentPrice?: number;
+  priceCurrency?: string;
+}
+
+export type StopTierId = 'relief' | 'retreat' | 'bailout';
+
+export interface StopTierConfig {
+  price: number | null;
+  sellPct: number | null;
+}
+
+export interface AssetStopLossConfig {
+  relief: StopTierConfig;
+  retreat: StopTierConfig;
+  bailout: StopTierConfig;
+}
+
+export const STOP_TIER_META: Record<
+  StopTierId,
+  { labelEn: string; labelZh: string; severity: number }
+> = {
+  relief: { labelEn: 'Relief Stop', labelZh: '降压线', severity: 1 },
+  retreat: { labelEn: 'Retreat Stop', labelZh: '撤退线', severity: 2 },
+  bailout: { labelEn: 'Bailout Stop', labelZh: '逃生线', severity: 3 },
+};
+
+export function assetRowKey(symbol: string, marketType: string): string {
+  return `${symbol}:${marketType}`;
 }
 
 export interface MonthlyPerformanceRow {
