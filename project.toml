@@ -1,4 +1,0 @@
-# Google Cloud Buildpacks — pin Node 20 (avoid default Node 24 on ubuntu2404)
-[[build.env]]
-name = "GOOGLE_NODEJS_VERSION"
-value = "20.18.3"
