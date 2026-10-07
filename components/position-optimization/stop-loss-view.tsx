@@ -20,7 +20,10 @@ import {
   clearAckIfRecovered,
   emptyStopConfig,
   isTierAcknowledged,
+  loadStopAcknowledgements,
   loadStopLossConfigs,
+  mergeAckMaps,
+  parseAckStorageKey,
   saveStopAcknowledgements,
   saveStopLossConfigs,
   type StopAckMap,
@@ -272,11 +275,39 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
         }
 
         saveStopLossConfigs(mergedConfigs);
-        setAcks(remote.acks);
-        saveStopAcknowledgements(remote.acks);
+
+        const localAcks = loadStopAcknowledgements();
+        let mergedAcks = mergeAckMaps(localAcks, remote.acks);
+
+        if (remote.tableReady) {
+          for (const [storageKey, entry] of Object.entries(localAcks)) {
+            if (remote.acks[storageKey]) continue;
+            const parsed = parseAckStorageKey(storageKey);
+            if (!parsed) continue;
+            try {
+              await ackStopLossRemote(
+                parsed.assetKey,
+                parsed.tierId,
+                entry.stopPrice,
+                entry.sellPct
+              );
+              mergedAcks = {
+                ...mergedAcks,
+                [storageKey]: entry,
+              };
+            } catch {
+              // Keep local ack until next successful sync.
+            }
+          }
+        }
+
+        setAcks(mergedAcks);
+        saveStopAcknowledgements(mergedAcks);
         setSyncError(null);
       } catch (err) {
         if (cancelled) return;
+        const fallbackAcks = loadStopAcknowledgements();
+        setAcks(fallbackAcks);
         setSyncError(err instanceof Error ? err.message : 'Failed to load stop settings');
       } finally {
         if (!cancelled) setRemoteLoaded(true);
@@ -431,24 +462,36 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     });
   }, [evaluated, remoteLoaded, tableReady]);
 
+  const persistAck = async (
+    assetKey: string,
+    tierId: StopTierId,
+    stopPrice: number,
+    sellPct: number
+  ) => {
+    setAcks((prev) => {
+      const next = acknowledgeTier(prev, assetKey, tierId, stopPrice, sellPct);
+      saveStopAcknowledgements(next);
+      return next;
+    });
+    if (!tableReady) return;
+    try {
+      await ackStopLossRemote(assetKey, tierId, stopPrice, sellPct);
+      setSyncError(null);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : 'Failed to save acknowledgement');
+    }
+  };
+
   const acknowledgeOne = (
     assetKey: string,
     tierId: StopTierId,
     stopPrice: number,
     sellPct: number
   ) => {
-    const next = acknowledgeTier(acks, assetKey, tierId, stopPrice, sellPct);
-    saveStopAcknowledgements(next);
-    setAcks(next);
-    if (tableReady) {
-      void ackStopLossRemote(assetKey, tierId, stopPrice, sellPct).catch((err) => {
-        setSyncError(err instanceof Error ? err.message : 'Failed to save acknowledgement');
-      });
-    }
+    void persistAck(assetKey, tierId, stopPrice, sellPct);
   };
 
   const acknowledgeAllActive = () => {
-    let next = { ...acks };
     const pending: Array<{
       assetKey: string;
       tierId: StopTierId;
@@ -458,7 +501,6 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     for (const row of evaluated) {
       for (const t of row.activeAlerts) {
         if (t.stopPrice != null && t.sellPct != null) {
-          next = acknowledgeTier(next, row.key, t.tierId, t.stopPrice, t.sellPct);
           pending.push({
             assetKey: row.key,
             tierId: t.tierId,
@@ -468,18 +510,30 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
         }
       }
     }
-    saveStopAcknowledgements(next);
-    setAcks(next);
-    if (tableReady) {
+    if (pending.length === 0) return;
+
+    setAcks((prev) => {
+      let next = prev;
       for (const item of pending) {
-        void ackStopLossRemote(
-          item.assetKey,
-          item.tierId,
-          item.stopPrice,
-          item.sellPct
-        ).catch(() => {});
+        next = acknowledgeTier(next, item.assetKey, item.tierId, item.stopPrice, item.sellPct);
       }
-    }
+      saveStopAcknowledgements(next);
+      return next;
+    });
+
+    if (!tableReady) return;
+    void (async () => {
+      try {
+        await Promise.all(
+          pending.map((item) =>
+            ackStopLossRemote(item.assetKey, item.tierId, item.stopPrice, item.sellPct)
+          )
+        );
+        setSyncError(null);
+      } catch (err) {
+        setSyncError(err instanceof Error ? err.message : 'Failed to save acknowledgement');
+      }
+    })();
   };
 
   const activeAlertCount = evaluated.reduce((n, row) => n + row.activeAlerts.length, 0);

@@ -98,6 +98,33 @@ export function clearAckIfRecovered(
   return acks;
 }
 
+/** Compare threshold values from UI vs Postgres DECIMAL without false mismatches. */
+export function stopValuesMatch(a: number, b: number): boolean {
+  if (a === b) return true;
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= scale * 1e-6;
+}
+
+export function parseAckStorageKey(
+  storageKey: string
+): { assetKey: string; tierId: StopTierId } | null {
+  const tiers: StopTierId[] = ['relief', 'retreat', 'bailout'];
+  for (const tierId of tiers) {
+    const suffix = `:${tierId}`;
+    if (storageKey.endsWith(suffix)) {
+      const assetKey = storageKey.slice(0, -suffix.length);
+      if (assetKey.length > 0 && assetKey.includes(':')) {
+        return { assetKey, tierId };
+      }
+    }
+  }
+  return null;
+}
+
+export function mergeAckMaps(local: StopAckMap, remote: StopAckMap): StopAckMap {
+  return { ...local, ...remote };
+}
+
 export function isTierAcknowledged(
   acks: StopAckMap,
   assetKey: string,
@@ -108,7 +135,9 @@ export function isTierAcknowledged(
   if (stopPrice == null || sellPct == null) return false;
   const entry = acks[ackStorageKey(assetKey, tierId)];
   if (!entry) return false;
-  return entry.stopPrice === stopPrice && entry.sellPct === sellPct;
+  return (
+    stopValuesMatch(entry.stopPrice, stopPrice) && stopValuesMatch(entry.sellPct, sellPct)
+  );
 }
 
 export function acknowledgeTier(
