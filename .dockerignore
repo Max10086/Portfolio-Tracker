@@ -1,0 +1,10 @@
+node_modules
+.next
+.git
+.gitignore
+.env*
+README.md
+SETUP.md
+supabase/.temp
+scripts
+*.md
