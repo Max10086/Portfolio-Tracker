@@ -1,6 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import {
+  GATEKEEPER_OPEN_TRADE_EVENT,
+  readGatekeeperTradePrefill,
+  clearGatekeeperTradePrefill,
+  type GatekeeperTradePrefill,
+} from '@/lib/gatekeeper-prefill';
 import { Plus, RefreshCw, History, Wallet } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -68,7 +74,26 @@ export function HoldingsCard({
   const loading = usesSharedHoldings ? Boolean(sharedHoldingsLoading) : localLoading;
   const error = usesSharedHoldings ? sharedHoldingsError ?? null : localError;
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [gatekeeperPrefill, setGatekeeperPrefill] = useState<GatekeeperTradePrefill | null>(
+    null
+  );
   const [activeTab, setActiveTab] = useState('holdings');
+
+  const openDialogFromGatekeeper = useCallback(() => {
+    const prefill = readGatekeeperTradePrefill();
+    if (prefill) {
+      setGatekeeperPrefill(prefill);
+      clearGatekeeperTradePrefill();
+    }
+    setActiveTab('holdings');
+    setIsDialogOpen(true);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => openDialogFromGatekeeper();
+    window.addEventListener(GATEKEEPER_OPEN_TRADE_EVENT, handler);
+    return () => window.removeEventListener(GATEKEEPER_OPEN_TRADE_EVENT, handler);
+  }, [openDialogFromGatekeeper]);
 
   const fetchHoldings = async () => {
     if (usesSharedHoldings) {
@@ -168,7 +193,7 @@ export function HoldingsCard({
   };
 
   return (
-    <Card className="h-[800px] flex flex-col">
+    <Card id="portfolio-holdings-card" className="h-[800px] flex flex-col">
       <CardHeader className="flex-shrink-0">
         <div className="flex items-center justify-between">
           <div>
@@ -264,7 +289,11 @@ export function HoldingsCard({
 
       <AddAssetDialog
         open={isDialogOpen}
-        onOpenChange={setIsDialogOpen}
+        onOpenChange={(open) => {
+          setIsDialogOpen(open);
+          if (!open) setGatekeeperPrefill(null);
+        }}
+        gatekeeperPrefill={gatekeeperPrefill}
         onAssetAdded={handleAssetAdded}
         existingHoldings={holdings?.assets.map((asset) => ({
           symbol: asset.symbol,

@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { MarketType } from '@/lib/price-service';
+import type { GatekeeperTradePrefill } from '@/lib/gatekeeper-prefill';
 
 type TransactionType = 'BUY' | 'SELL';
 type CashCurrency = 'USD' | 'CNY' | 'HKD';
@@ -27,6 +28,7 @@ type CashCurrency = 'USD' | 'CNY' | 'HKD';
 interface AddAssetDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  gatekeeperPrefill?: GatekeeperTradePrefill | null;
   onAssetAdded: () => void;
   existingHoldings: Array<{
     symbol: string;
@@ -39,6 +41,7 @@ interface AddAssetDialogProps {
 export function AddAssetDialog({
   open,
   onOpenChange,
+  gatekeeperPrefill = null,
   onAssetAdded,
   existingHoldings,
 }: AddAssetDialogProps) {
@@ -104,6 +107,17 @@ export function AddAssetDialog({
       fetchLatestCashAssets();
     }
   },[open, fetchLatestCashAssets]);
+
+  useEffect(() => {
+    if (!open || !gatekeeperPrefill) return;
+    setMarketType(gatekeeperPrefill.marketType);
+    setSymbol(gatekeeperPrefill.symbol);
+    setTransactionType(gatekeeperPrefill.transactionType);
+    if (gatekeeperPrefill.quantity) setQuantity(gatekeeperPrefill.quantity);
+    if (gatekeeperPrefill.pricePerUnit) setPricePerUnit(gatekeeperPrefill.pricePerUnit);
+    setSelectedHoldingKey('manual');
+    setError(null);
+  }, [open, gatekeeperPrefill]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

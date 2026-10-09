@@ -40,6 +40,7 @@ import { MonthlyTimelineView } from '@/components/position-optimization/monthly-
 import { PositionTreemapView } from '@/components/position-optimization/position-treemap-view';
 import { StrategyQualityView } from '@/components/position-optimization/strategy-quality-view';
 import { StopLossView } from '@/components/position-optimization/stop-loss-view';
+import { GatekeeperView } from '@/components/position-optimization/gatekeeper-view';
 import type { ClosedTradeRow } from '@/components/position-optimization/types';
 import {
   loadAssetNameCache,
@@ -127,7 +128,14 @@ interface AnalyticsResponse {
   closedTradesInRange?: ClosedTradeRow[];
 }
 
-type PositionOptTab = 'table' | 'attribution' | 'timeline' | 'treemap' | 'strategy' | 'stops';
+type PositionOptTab =
+  | 'table'
+  | 'attribution'
+  | 'timeline'
+  | 'treemap'
+  | 'strategy'
+  | 'stops'
+  | 'gatekeeper';
 
 type AiTimeRange = '7d' | '30d' | '90d' | '365d';
 
@@ -764,6 +772,9 @@ export function PerformanceInsightsPanel() {
               <TabsTrigger value="stops" className="text-xs sm:text-sm">
                 Stops
               </TabsTrigger>
+              <TabsTrigger value="gatekeeper" className="text-xs sm:text-sm">
+                Gatekeeper
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="attribution" className="mt-0">
@@ -805,6 +816,15 @@ export function PerformanceInsightsPanel() {
 
             <TabsContent value="stops" className="mt-0">
               <StopLossView assets={allAssets} assetNameByKey={assetNameByKey} />
+            </TabsContent>
+
+            <TabsContent value="gatekeeper" className="mt-0">
+              <GatekeeperView
+                assets={allAssets}
+                assetNameByKey={assetNameByKey}
+                defaultEquity={data?.reviewPanel.currentValue ?? 0}
+                baseCurrency={data?.baseCurrency ?? 'USD'}
+              />
             </TabsContent>
 
             <TabsContent value="table" className="mt-0">
