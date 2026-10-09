@@ -150,6 +150,29 @@ export async function upsertStopLossAck(
   if (error) throw error;
 }
 
+export async function deleteStopLossForAsset(assetKey: string): Promise<void> {
+  const parsed = parseAssetKey(assetKey);
+  const symbol = parsed.symbol;
+  const market_type = parsed.market_type as MarketType;
+  const supabase = createServerClient();
+
+  const { error: configError } = await supabase
+    .from('asset_stop_loss')
+    .delete()
+    .eq('symbol', symbol)
+    .eq('market_type', market_type);
+
+  if (configError) throw configError;
+
+  const { error: ackError } = await supabase
+    .from('asset_stop_loss_ack')
+    .delete()
+    .eq('symbol', symbol)
+    .eq('market_type', market_type);
+
+  if (ackError) throw ackError;
+}
+
 export async function deleteStopLossAck(assetKey: string, tierId: StopTierId): Promise<void> {
   const parsed = parseAssetKey(assetKey);
   const symbol = parsed.symbol;

@@ -29,6 +29,26 @@ export function normalizeStopAssetKey(symbol: string, marketType: string): strin
   return normalizeAssetNameKey(symbol, marketType);
 }
 
+/** Stablecoins / cash-like holdings — no stop-loss ladder. */
+const STOP_LOSS_EXCLUDED_SYMBOLS = new Set(['USDT', 'USDC']);
+
+export function isAssetEligibleForStopLoss(symbol: string, marketType: string): boolean {
+  const market = marketType.trim().toUpperCase();
+  if (market === 'CASH') return false;
+  const sym = symbol.trim().toUpperCase();
+  if (STOP_LOSS_EXCLUDED_SYMBOLS.has(sym)) return false;
+  return true;
+}
+
+export function isAssetKeyEligibleForStopLoss(assetKey: string): boolean {
+  try {
+    const { symbol, market_type } = parseAssetKey(assetKey);
+    return isAssetEligibleForStopLoss(symbol, market_type);
+  } catch {
+    return true;
+  }
+}
+
 export function emptyStopConfig(): AssetStopLossConfig {
   return {
     relief: { price: null, sellPct: null },
@@ -155,4 +175,34 @@ export function acknowledgeTier(
       acknowledgedAt: new Date().toISOString(),
     },
   };
+}
+
+const ALL_TIERS: StopTierId[] = ['relief', 'retreat', 'bailout'];
+
+/** Drop all tier acknowledgements for one asset. */
+export function clearAcksForAsset(acks: StopAckMap, assetKey: string): StopAckMap {
+  let next = acks;
+  let changed = false;
+  for (const tierId of ALL_TIERS) {
+    const key = ackStorageKey(assetKey, tierId);
+    if (key in next) {
+      if (!changed) {
+        next = { ...next };
+        changed = true;
+      }
+      delete next[key];
+    }
+  }
+  return next;
+}
+
+/** Remove saved thresholds for one asset from localStorage. */
+export function removeStopLossConfigForAsset(
+  configs: Record<string, AssetStopLossConfig>,
+  assetKey: string
+): Record<string, AssetStopLossConfig> {
+  if (!(assetKey in configs)) return configs;
+  const next = { ...configs };
+  delete next[assetKey];
+  return next;
 }

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
-import { Bell, CheckCircle2, ShieldCheck, SlidersHorizontal } from 'lucide-react';
+import { Bell, CheckCircle2, ShieldCheck, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { formatFullMoney } from './chart-theme';
 import { StopLossLadder } from './stop-loss-ladder';
 import {
@@ -21,9 +21,14 @@ import {
   emptyStopConfig,
   isTierAcknowledged,
   loadStopAcknowledgements,
+  clearAcksForAsset,
+  isAssetEligibleForStopLoss,
+  isAssetKeyEligibleForStopLoss,
   loadStopLossConfigs,
   mergeAckMaps,
   parseAckStorageKey,
+  parseAssetKey,
+  removeStopLossConfigForAsset,
   saveStopAcknowledgements,
   saveStopLossConfigs,
   type StopAckMap,
@@ -31,6 +36,7 @@ import {
 import {
   ackStopLossRemote,
   clearStopLossAckRemote,
+  deleteStopLossRemote,
   fetchStopLossRemote,
   saveStopLossRemote,
 } from '@/lib/stop-loss-client';
@@ -223,7 +229,7 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     () =>
       assets.filter(
         (a) =>
-          a.marketType !== 'CASH' &&
+          isAssetEligibleForStopLoss(a.symbol, a.marketType) &&
           a.currentValue > 0 &&
           (a.quantity ?? 0) > 0 &&
           (a.currentPrice ?? 0) > 0
@@ -237,6 +243,7 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
   const [tableReady, setTableReady] = useState(true);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [expandedEdit, setExpandedEdit] = useState<Record<string, boolean>>({});
+  const [configVersion, setConfigVersion] = useState(0);
   const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const heldKeysSignature = useMemo(
@@ -261,6 +268,7 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
 
         if (remote.tableReady) {
           for (const [key, config] of Object.entries(local)) {
+            if (!isAssetKeyEligibleForStopLoss(key)) continue;
             if (!mergedConfigs[key] && configHasData(config)) {
               try {
                 await saveStopLossRemote(key, config);
@@ -271,13 +279,35 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
             }
           }
         } else {
-          Object.assign(mergedConfigs, local);
+          for (const [key, config] of Object.entries(local)) {
+            if (isAssetKeyEligibleForStopLoss(key)) {
+              mergedConfigs[key] = config;
+            }
+          }
+        }
+
+        const ineligibleKeys = Object.keys(mergedConfigs).filter(
+          (key) => configHasData(mergedConfigs[key]) && !isAssetKeyEligibleForStopLoss(key)
+        );
+        for (const key of ineligibleKeys) {
+          delete mergedConfigs[key];
+          if (remote.tableReady) {
+            try {
+              await deleteStopLossRemote(key);
+            } catch {
+              // Best-effort cleanup for cash-like assets (e.g. USDT).
+            }
+          }
         }
 
         saveStopLossConfigs(mergedConfigs);
+        setConfigVersion((v) => v + 1);
 
         const localAcks = loadStopAcknowledgements();
         let mergedAcks = mergeAckMaps(localAcks, remote.acks);
+        for (const key of ineligibleKeys) {
+          mergedAcks = clearAcksForAsset(mergedAcks, key);
+        }
 
         if (remote.tableReady) {
           for (const [storageKey, entry] of Object.entries(localAcks)) {
@@ -345,12 +375,73 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     if (existing) clearTimeout(existing);
     saveTimersRef.current[assetKey] = setTimeout(() => {
       void saveStopLossRemote(assetKey, config)
-        .then(() => setSyncError(null))
+        .then(() => {
+          setSyncError(null);
+          setConfigVersion((v) => v + 1);
+        })
         .catch((err) => {
           setSyncError(err instanceof Error ? err.message : 'Failed to save stop settings');
         });
     }, 450);
+    setConfigVersion((v) => v + 1);
   }, [tableReady]);
+
+  const heldKeySet = useMemo(
+    () => new Set(heldAssets.map((a) => assetRowKey(a.symbol, a.marketType))),
+    [heldAssets]
+  );
+
+  const orphanStopKeys = useMemo(() => {
+    if (!remoteLoaded) return [];
+    const stored = loadStopLossConfigs();
+    return Object.keys(stored)
+      .filter(
+        (key) =>
+          isAssetKeyEligibleForStopLoss(key) &&
+          !heldKeySet.has(key) &&
+          configHasData(stored[key])
+      )
+      .sort();
+  }, [heldKeySet, remoteLoaded, configVersion]);
+
+  const deleteAssetStops = useCallback(
+    async (assetKey: string) => {
+      const pending = saveTimersRef.current[assetKey];
+      if (pending) clearTimeout(pending);
+      delete saveTimersRef.current[assetKey];
+
+      const stored = loadStopLossConfigs();
+      saveStopLossConfigs(removeStopLossConfigForAsset(stored, assetKey));
+
+      setDrafts((prev) => {
+        if (!(assetKey in prev)) return prev;
+        const next = { ...prev };
+        delete next[assetKey];
+        return next;
+      });
+      setAcks((prev) => {
+        const next = clearAcksForAsset(prev, assetKey);
+        saveStopAcknowledgements(next);
+        return next;
+      });
+      setExpandedEdit((prev) => {
+        if (!(assetKey in prev)) return prev;
+        const next = { ...prev };
+        delete next[assetKey];
+        return next;
+      });
+      setConfigVersion((v) => v + 1);
+
+      if (!tableReady) return;
+      try {
+        await deleteStopLossRemote(assetKey);
+        setSyncError(null);
+      } catch (err) {
+        setSyncError(err instanceof Error ? err.message : 'Failed to delete stop settings');
+      }
+    },
+    [tableReady]
+  );
 
   const updateField = (
     assetKey: string,
@@ -549,11 +640,79 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     });
   }, [evaluated]);
 
-  if (heldAssets.length === 0) {
+  if (heldAssets.length === 0 && orphanStopKeys.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
         No open non-cash positions. Add holdings to configure stop-loss tiers.
       </p>
+    );
+  }
+
+  const orphanSection =
+    orphanStopKeys.length > 0 ? (
+      <section className="space-y-3 rounded-2xl border border-dashed bg-muted/20 p-4">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Closed positions
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Stop settings for assets you no longer hold. Remove them so they do not reappear if you
+            buy again later.
+          </p>
+        </div>
+        <ul className="space-y-2">
+          {orphanStopKeys.map((key) => {
+            let symbol = key;
+            let market = '';
+            try {
+              const parsed = parseAssetKey(key);
+              symbol = parsed.symbol;
+              market = parsed.market_type;
+            } catch {
+              // keep raw key as label fallback
+            }
+            const displayName = assetNameByKey[key] || symbol;
+            return (
+              <li
+                key={`orphan-${key}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{displayName}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {market ? `${symbol} · ${market}` : key}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  onClick={() => void deleteAssetStops(key)}
+                >
+                  <Trash2 className="mr-1.5 h-4 w-4" aria-hidden />
+                  Remove stops
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+    ) : null;
+
+  if (heldAssets.length === 0) {
+    return (
+      <div className="space-y-6">
+        {!remoteLoaded && (
+          <p className="text-sm text-muted-foreground">Loading stop-loss settings…</p>
+        )}
+        {syncError && (
+          <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-900 dark:text-red-100">
+            {syncError}
+          </p>
+        )}
+        {orphanSection}
+      </div>
     );
   }
 
@@ -744,11 +903,24 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
                     {asset.symbol} · {asset.marketType}
                   </p>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm font-semibold tabular-nums">{formatPrice(price)}</p>
-                  <p className="text-xs text-muted-foreground tabular-nums">
-                    {formatFullMoney(asset.currentValue, currency)}
-                  </p>
+                <div className="flex shrink-0 items-start gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                    title="Remove all stop thresholds"
+                    aria-label={`Remove all stops for ${displayName}`}
+                    onClick={() => void deleteAssetStops(key)}
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden />
+                  </Button>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold tabular-nums">{formatPrice(price)}</p>
+                    <p className="text-xs text-muted-foreground tabular-nums">
+                      {formatFullMoney(asset.currentValue, currency)}
+                    </p>
+                  </div>
                 </div>
               </header>
 
@@ -890,6 +1062,8 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
           );
         })}
       </div>
+
+      {orphanSection}
     </div>
   );
 }

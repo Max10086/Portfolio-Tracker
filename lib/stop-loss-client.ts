@@ -65,6 +65,21 @@ export async function ackStopLossRemote(
   }
 }
 
+export async function deleteStopLossRemote(assetKey: string): Promise<void> {
+  const { symbol, market_type } = parseAssetKey(assetKey);
+  const response = await fetch('/api/stop-loss', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol, market_type }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(
+      typeof payload.details === 'string' ? payload.details : payload.error || 'Delete failed'
+    );
+  }
+}
+
 export async function clearStopLossAckRemote(
   assetKey: string,
   tierId: StopTierId

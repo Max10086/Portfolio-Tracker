@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { AssetStopLossConfig } from '@/components/position-optimization/types';
 import { normalizeAssetNameKey } from '@/lib/asset-name-cache';
 import {
+  deleteStopLossForAsset,
   fetchAllStopLossFromDb,
   upsertStopLossConfig,
 } from '@/lib/stop-loss-db';
@@ -57,6 +58,38 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json(
       {
         error: 'Failed to save stop-loss settings',
+        details: message,
+      },
+      { status }
+    );
+  }
+}
+
+/**
+ * DELETE /api/stop-loss — remove all tiers and acknowledgements for one asset
+ * Body: { symbol, market_type }
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const symbol = String(body?.symbol || '').trim();
+    const marketType = String(body?.market_type || '').trim().toUpperCase();
+
+    if (!symbol || !marketType) {
+      return NextResponse.json({ error: 'symbol and market_type are required' }, { status: 400 });
+    }
+
+    const assetKey = normalizeAssetNameKey(symbol, marketType);
+    await deleteStopLossForAsset(assetKey);
+
+    return NextResponse.json({ ok: true, assetKey });
+  } catch (error) {
+    console.error('[stop-loss] DELETE failed:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const status = message.includes('schema cache') || message.includes('does not exist') ? 503 : 500;
+    return NextResponse.json(
+      {
+        error: 'Failed to delete stop-loss settings',
         details: message,
       },
       { status }
