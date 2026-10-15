@@ -14,6 +14,7 @@ import {
   type StopTierId,
   assetRowKey,
 } from './types';
+import { isOpenPosition } from '@/lib/open-position';
 import {
   ackStorageKey,
   acknowledgeTier,
@@ -22,7 +23,6 @@ import {
   isTierAcknowledged,
   loadStopAcknowledgements,
   clearAcksForAsset,
-  isAssetEligibleForStopLoss,
   isAssetKeyEligibleForStopLoss,
   loadStopLossConfigs,
   mergeAckMaps,
@@ -226,14 +226,7 @@ function MiniRiskBar({
 
 export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps) {
   const heldAssets = useMemo(
-    () =>
-      assets.filter(
-        (a) =>
-          isAssetEligibleForStopLoss(a.symbol, a.marketType) &&
-          a.currentValue > 0 &&
-          (a.quantity ?? 0) > 0 &&
-          (a.currentPrice ?? 0) > 0
-      ),
+    () => assets.filter((a) => isOpenPosition(a)),
     [assets]
   );
 

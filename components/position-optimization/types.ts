@@ -26,6 +26,8 @@ export interface AssetRow {
   avgHoldingDays: number;
   trades: number;
   winRate: number;
+  /** True when `current_holdings` has quantity above dust threshold. */
+  hasOpenPosition?: boolean;
   /** Open position size (0 if flat). */
   quantity?: number;
   /** Last quote in `priceCurrency`. */

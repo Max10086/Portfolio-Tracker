@@ -41,7 +41,7 @@ import {
 } from '@/lib/gatekeeper-client';
 import type { GatekeeperSessionRow } from '@/lib/gatekeeper-db';
 import { stashGatekeeperTradePrefill } from '@/lib/gatekeeper-prefill';
-import { isAssetEligibleForStopLoss } from '@/lib/stop-loss-config';
+import { isOpenPosition } from '@/lib/open-position';
 import type { MarketType } from '@/lib/price-service';
 import {
   currencySymbol,
@@ -157,12 +157,7 @@ export function GatekeeperView({
 
   const pickableAssets = useMemo(
     () =>
-      assets.filter(
-        (a) =>
-          isAssetEligibleForStopLoss(a.symbol, a.marketType) &&
-          (a.quantity ?? 0) > 0 &&
-          a.marketType !== 'CASH'
-      ),
+      assets.filter((a) => isOpenPosition(a) && a.marketType !== 'CASH'),
     [assets]
   );
 

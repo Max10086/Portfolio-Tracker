@@ -95,6 +95,10 @@ interface AssetRow {
   avgHoldingDays: number;
   trades: number;
   winRate: number;
+  hasOpenPosition?: boolean;
+  quantity?: number;
+  currentPrice?: number;
+  priceCurrency?: string;
 }
 
 interface AnalyticsResponse {

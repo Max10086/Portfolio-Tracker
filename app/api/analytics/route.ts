@@ -57,7 +57,10 @@ interface AssetStats {
   quantity: number;
   currentPrice: number;
   priceCurrency: string;
+  hasOpenPosition: boolean;
 }
+
+const MIN_OPEN_POSITION_QTY = 1e-6;
 
 interface AggregateStats {
   key: string;
@@ -188,7 +191,7 @@ export async function GET(request: NextRequest) {
     const latestCreatedAt = latestTxRes.data?.[0]?.created_at || 'none';
     const latestUpdatedAt = latestUpdateRes.data?.[0]?.updated_at || 'none';
     const txCount = txCountRes.count || 0;
-    const markerKey = `analytics-v4|${latestCreatedAt}|${latestUpdatedAt}|${txCount}|${baseCurrency}|${timeRange}`;
+    const markerKey = `analytics-v5|${latestCreatedAt}|${latestUpdatedAt}|${txCount}|${baseCurrency}|${timeRange}`;
     if (!globalThis.__analyticsCacheMap) {
       globalThis.__analyticsCacheMap = new Map<string, AnalyticsCacheEntry>();
     }
@@ -582,24 +585,28 @@ export async function GET(request: NextRequest) {
         const holdingAcc = holdingAccByAsset.get(assetKey) || { daysQty: 0, qty: 0 };
         const avgHoldingDays = holdingAcc.qty > 0 ? holdingAcc.daysQty / holdingAcc.qty : 0;
         const tag = tagByAsset.get(assetKey) || 'Uncategorized';
-        const quote = holdingQuoteByAsset.get(assetKey);
+        const heldQty = holdingQtyByAsset.get(assetKey);
+        const isOpen =
+          heldQty != null && Number.isFinite(heldQty) && heldQty > MIN_OPEN_POSITION_QTY;
+        const quote = isOpen ? holdingQuoteByAsset.get(assetKey) : undefined;
         return {
           symbol,
           name: symbol,
           marketType: marketType as MarketType,
           tag,
-          currentValue: round2(agg.currentValue),
-          allocationPct: round2(allocationPct),
+          currentValue: isOpen ? round2(agg.currentValue) : 0,
+          allocationPct: isOpen ? round2(allocationPct) : 0,
           realizedPnL: round2(agg.realizedPnL),
-          unrealizedPnL: round2(agg.unrealizedPnL),
+          unrealizedPnL: isOpen ? round2(agg.unrealizedPnL) : 0,
           totalPnL: round2(agg.totalPnL),
-          costBasis: round2(costBasis),
+          costBasis: isOpen ? round2(costBasis) : 0,
           investedCapital: round2(investedCapital),
           returnPct: round2(returnPct),
           avgHoldingDays: round2(avgHoldingDays),
           trades,
           winRate: round2(winRateAsset),
-          quantity: quote ? Number(quote.quantity) : 0,
+          hasOpenPosition: isOpen,
+          quantity: isOpen ? Number(heldQty) : 0,
           currentPrice: quote ? round2(quote.currentPrice) : 0,
           priceCurrency: quote?.priceCurrency || baseCurrency,
         };
