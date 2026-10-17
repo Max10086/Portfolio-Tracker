@@ -174,7 +174,14 @@ function assetHistoryKey(symbol: string, marketType: string): string {
   return normalizeAssetNameKey(symbol, marketType);
 }
 
-export function PerformanceInsightsPanel() {
+interface PerformanceInsightsPanelProps {
+  /** Increments when holdings/transactions change on the home page. */
+  portfolioRefreshTrigger?: number;
+}
+
+export function PerformanceInsightsPanel({
+  portfolioRefreshTrigger = 0,
+}: PerformanceInsightsPanelProps) {
   const savedReviewsKey = 'portfolio-tracker-ai-reviews-v1';
   const defaultAiPrompt = `你是极其严苛且洞察力极强的资深交易教练与行为金融分析师。
 我将提供我近期的完整交易历史（包含盈亏记录）。请不要给我任何关于具体点位、指标或微观操作的战术建议，我需要的是极其冷酷、一针见血的深度行为复盘，以打破我的认知盲区并引发深度反思。
@@ -302,8 +309,8 @@ export function PerformanceInsightsPanel() {
   };
 
   useEffect(() => {
-    fetchAnalytics();
-  }, []);
+    void fetchAnalytics();
+  }, [portfolioRefreshTrigger]);
 
   useEffect(() => {
     try {
@@ -819,7 +826,11 @@ export function PerformanceInsightsPanel() {
             </TabsContent>
 
             <TabsContent value="stops" className="mt-0">
-              <StopLossView assets={allAssets} assetNameByKey={assetNameByKey} />
+              <StopLossView
+                assets={allAssets}
+                assetNameByKey={assetNameByKey}
+                portfolioRefreshTrigger={portfolioRefreshTrigger}
+              />
             </TabsContent>
 
             <TabsContent value="gatekeeper" className="mt-0">

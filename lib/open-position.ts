@@ -17,3 +17,12 @@ export function isOpenPosition(
   if (!Number.isFinite(price) || price <= 0) return false;
   return isAssetEligibleForStopLoss(asset.symbol, asset.marketType);
 }
+
+/** `null` = server keys not loaded yet; otherwise use `current_holdings` as source of truth. */
+export function isOpenPositionKey(
+  assetKey: string,
+  openPositionKeys: ReadonlySet<string> | null
+): boolean {
+  if (openPositionKeys === null) return true;
+  return openPositionKeys.has(assetKey);
+}

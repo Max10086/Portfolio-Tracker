@@ -6,6 +6,8 @@ export interface StopLossRemoteState {
   configs: Record<string, AssetStopLossConfig>;
   acks: StopAckMap;
   tableReady: boolean;
+  /** Authoritative open keys from `current_holdings` (server). */
+  openPositionKeys: string[];
 }
 
 export async function fetchStopLossRemote(): Promise<StopLossRemoteState> {
@@ -20,6 +22,7 @@ export async function fetchStopLossRemote(): Promise<StopLossRemoteState> {
     configs: payload.configs || {},
     acks: payload.acks || {},
     tableReady: payload.tableReady !== false,
+    openPositionKeys: Array.isArray(payload.openPositionKeys) ? payload.openPositionKeys : [],
   };
 }
 

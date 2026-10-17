@@ -14,7 +14,8 @@ import {
   type StopTierId,
   assetRowKey,
 } from './types';
-import { isOpenPosition } from '@/lib/open-position';
+import { isOpenPosition, isOpenPositionKey } from '@/lib/open-position';
+import { isAssetEligibleForStopLoss } from '@/lib/stop-loss-config';
 import {
   ackStorageKey,
   acknowledgeTier,
@@ -44,6 +45,8 @@ import {
 interface StopLossViewProps {
   assets: AssetRow[];
   assetNameByKey?: Record<string, string>;
+  /** Bumps when portfolio transactions change — refetch holdings + stop sync. */
+  portfolioRefreshTrigger?: number;
 }
 
 type TierField = 'price' | 'sellPct';
@@ -224,10 +227,24 @@ function MiniRiskBar({
   );
 }
 
-export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps) {
+export function StopLossView({
+  assets,
+  assetNameByKey = {},
+  portfolioRefreshTrigger = 0,
+}: StopLossViewProps) {
+  const [openPositionKeySet, setOpenPositionKeySet] = useState<Set<string> | null>(null);
+
   const heldAssets = useMemo(
-    () => assets.filter((a) => isOpenPosition(a)),
-    [assets]
+    () =>
+      assets.filter((a) => {
+        const key = assetRowKey(a.symbol, a.marketType);
+        if (!isOpenPositionKey(key, openPositionKeySet)) return false;
+        if (openPositionKeySet === null && !isOpenPosition(a)) return false;
+        if (!isAssetEligibleForStopLoss(a.symbol, a.marketType)) return false;
+        const price = Number(a.currentPrice ?? 0);
+        return Number.isFinite(price) && price > 0;
+      }),
+    [assets, openPositionKeySet]
   );
 
   const [drafts, setDrafts] = useState<Record<string, AssetDraft>>({});
@@ -248,13 +265,11 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     [heldAssets]
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
+  const syncStopLossRemote = useCallback(async () => {
+    try {
         const remote = await fetchStopLossRemote();
-        if (cancelled) return;
 
+        setOpenPositionKeySet(new Set(remote.openPositionKeys));
         setTableReady(remote.tableReady);
         const local = loadStopLossConfigs();
         const mergedConfigs = { ...remote.configs };
@@ -327,25 +342,34 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
         setAcks(mergedAcks);
         saveStopAcknowledgements(mergedAcks);
         setSyncError(null);
-      } catch (err) {
-        if (cancelled) return;
+    } catch (err) {
         const fallbackAcks = loadStopAcknowledgements();
         setAcks(fallbackAcks);
         setSyncError(err instanceof Error ? err.message : 'Failed to load stop settings');
-      } finally {
-        if (!cancelled) setRemoteLoaded(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    } finally {
+        setRemoteLoaded(true);
+    }
   }, []);
+
+  useEffect(() => {
+    void syncStopLossRemote();
+  }, [syncStopLossRemote, portfolioRefreshTrigger]);
+
+  const heldKeySet = useMemo(
+    () => new Set(heldAssets.map((a) => assetRowKey(a.symbol, a.marketType))),
+    [heldAssets]
+  );
 
   useEffect(() => {
     if (!remoteLoaded) return;
     const stored = loadStopLossConfigs();
     setDrafts((prev) => {
       const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (!heldKeySet.has(key)) {
+          delete next[key];
+        }
+      }
       for (const asset of heldAssets) {
         const key = assetRowKey(asset.symbol, asset.marketType);
         if (!(key in next)) {
@@ -354,7 +378,7 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
       }
       return next;
     });
-  }, [heldKeysSignature, heldAssets, remoteLoaded]);
+  }, [heldKeysSignature, heldAssets, remoteLoaded, heldKeySet]);
 
   const persistDraft = useCallback((assetKey: string, draft: AssetDraft) => {
     const config = draftToConfig(draft);
@@ -378,11 +402,6 @@ export function StopLossView({ assets, assetNameByKey = {} }: StopLossViewProps)
     }, 450);
     setConfigVersion((v) => v + 1);
   }, [tableReady]);
-
-  const heldKeySet = useMemo(
-    () => new Set(heldAssets.map((a) => assetRowKey(a.symbol, a.marketType))),
-    [heldAssets]
-  );
 
   const orphanStopKeys = useMemo(() => {
     if (!remoteLoaded) return [];

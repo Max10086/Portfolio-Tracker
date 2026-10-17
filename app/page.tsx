@@ -104,7 +104,7 @@ export default function Home() {
       </div>
 
       <section className="mt-8">
-        <PerformanceInsightsPanel />
+        <PerformanceInsightsPanel portfolioRefreshTrigger={refreshKey} />
       </section>
     </main>
   );

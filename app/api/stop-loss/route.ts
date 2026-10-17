@@ -4,6 +4,7 @@ import { normalizeAssetNameKey } from '@/lib/asset-name-cache';
 import {
   deleteStopLossForAsset,
   fetchAllStopLossFromDb,
+  fetchOpenPositionKeysFromDb,
   upsertStopLossConfig,
 } from '@/lib/stop-loss-db';
 
@@ -14,11 +15,15 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET() {
   try {
-    const payload = await fetchAllStopLossFromDb();
+    const [payload, openPositionKeys] = await Promise.all([
+      fetchAllStopLossFromDb(),
+      fetchOpenPositionKeysFromDb().catch(() => [] as string[]),
+    ]);
     return NextResponse.json({
       configs: payload.configs,
       acks: payload.acks,
       tableReady: payload.tableReady,
+      openPositionKeys,
     });
   } catch (error) {
     console.error('[stop-loss] GET failed:', error);

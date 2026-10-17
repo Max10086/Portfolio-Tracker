@@ -191,7 +191,17 @@ export async function GET(request: NextRequest) {
     const latestCreatedAt = latestTxRes.data?.[0]?.created_at || 'none';
     const latestUpdatedAt = latestUpdateRes.data?.[0]?.updated_at || 'none';
     const txCount = txCountRes.count || 0;
-    const markerKey = `analytics-v5|${latestCreatedAt}|${latestUpdatedAt}|${txCount}|${baseCurrency}|${timeRange}`;
+
+    const { data: holdingsMarkerRows } = await supabase
+      .from('current_holdings')
+      .select('symbol, market_type, quantity')
+      .gt('quantity', 0);
+    const holdingsFingerprintParts = (holdingsMarkerRows || [])
+      .map((h) => `${keyFor(String(h.symbol), h.market_type)}:${Number(h.quantity)}`)
+      .sort();
+    const holdingsFingerprint = holdingsFingerprintParts.join('|') || 'flat';
+
+    const markerKey = `analytics-v6|${latestCreatedAt}|${latestUpdatedAt}|${txCount}|${baseCurrency}|${timeRange}|${holdingsFingerprint}`;
     if (!globalThis.__analyticsCacheMap) {
       globalThis.__analyticsCacheMap = new Map<string, AnalyticsCacheEntry>();
     }

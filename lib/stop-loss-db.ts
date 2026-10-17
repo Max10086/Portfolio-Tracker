@@ -1,5 +1,7 @@
 import { createServerClient } from '@/lib/supabase';
 import { normalizeAssetNameKey } from '@/lib/asset-name-cache';
+import { MIN_OPEN_POSITION_QTY } from '@/lib/open-position';
+import { isAssetEligibleForStopLoss } from '@/lib/stop-loss-config';
 import type { AssetStopLossConfig, StopTierId } from '@/components/position-optimization/types';
 import type { StopAckMap, StopTierAcknowledgement } from '@/lib/stop-loss-config';
 import { ackStorageKey, emptyStopConfig, parseAssetKey } from '@/lib/stop-loss-config';
@@ -41,6 +43,30 @@ function configToRow(symbol: string, market_type: MarketType, config: AssetStopL
     bailout_sell_pct: config.bailout.sellPct,
     updated_at: new Date().toISOString(),
   };
+}
+
+/** Keys for non-cash positions with quantity above dust — from `current_holdings`. */
+export async function fetchOpenPositionKeysFromDb(): Promise<string[]> {
+  const supabase = createServerClient();
+  const { data, error } = await supabase
+    .from('current_holdings')
+    .select('symbol, market_type, quantity')
+    .gt('quantity', 0);
+
+  if (error) {
+    throw error;
+  }
+
+  const keys: string[] = [];
+  for (const row of data || []) {
+    const symbol = String(row.symbol).trim();
+    const market_type = String(row.market_type).trim().toUpperCase();
+    const qty = Number(row.quantity);
+    if (!Number.isFinite(qty) || qty <= MIN_OPEN_POSITION_QTY) continue;
+    if (!isAssetEligibleForStopLoss(symbol, market_type)) continue;
+    keys.push(normalizeAssetNameKey(symbol, market_type));
+  }
+  return keys;
 }
 
 function isMissingTableError(message: string): boolean {
